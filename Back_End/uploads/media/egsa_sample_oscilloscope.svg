@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" width="800" height="500">
+  <defs>
+    <linearGradient id="bg2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#05192d"/>
+      <stop offset="60%" stop-color="#112240"/>
+      <stop offset="100%" stop-color="#0a192f"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+  <rect width="800" height="500" fill="url(#bg2)"/>
+  
+  <!-- Oscilloscope Grid Screen -->
+  <rect x="80" y="80" width="640" height="340" rx="12" fill="#020c1b" stroke="#1e293b" stroke-width="4"/>
+  
+  <!-- Oscilloscope Graticule Grid -->
+  <g stroke="rgba(16,185,129,0.15)" stroke-width="1">
+    <line x1="80" y1="136" x2="720" y2="136"/>
+    <line x1="80" y1="193" x2="720" y2="193"/>
+    <line x1="80" y1="250" x2="720" y2="250" stroke="rgba(16,185,129,0.35)" stroke-dasharray="2,2"/>
+    <line x1="80" y1="307" x2="720" y2="307"/>
+    <line x1="80" y1="364" x2="720" y2="364"/>
+
+    <line x1="160" y1="80" x2="160" y2="420"/>
+    <line x1="240" y1="80" x2="240" y2="420"/>
+    <line x1="320" y1="80" x2="320" y2="420"/>
+    <line x1="400" y1="80" x2="400" y2="420" stroke="rgba(16,185,129,0.35)" stroke-dasharray="2,2"/>
+    <line x1="480" y1="80" x2="480" y2="420"/>
+    <line x1="560" y1="80" x2="560" y2="420"/>
+    <line x1="640" y1="80" x2="640" y2="420"/>
+  </g>
+
+  <!-- Eye Diagram / LVDS Waveform -->
+  <path d="M 80 250 Q 140 130 200 250 T 320 250 T 440 250 T 560 250 T 680 250 L 720 250" fill="none" stroke="url(#wave)" stroke-width="3"/>
+  <path d="M 80 250 Q 140 370 200 250 T 320 250 T 440 250 T 560 250 T 680 250 L 720 250" fill="none" stroke="#38bdf8" stroke-width="2.5" opacity="0.8"/>
+  <path d="M 80 220 Q 140 160 200 250 T 320 250 T 440 250 T 560 250 T 680 250" fill="none" stroke="#f59e0b" stroke-width="1.5" opacity="0.6"/>
+
+  <!-- Instrument Header -->
+  <rect x="30" y="20" width="280" height="44" rx="6" fill="rgba(15,23,42,0.85)" stroke="rgba(255,255,255,0.1)"/>
+  <text x="45" y="40" fill="#94a3b8" font-family="sans-serif" font-size="10" font-weight="bold">EGSA SPACE ACADEMY · RF LAB</text>
+  <text x="45" y="55" fill="#10b981" font-family="monospace" font-size="12" font-weight="bold">LVDS 1.25 Gbps EYE DIAGRAM</text>
+
+  <rect x="520" y="20" width="250" height="44" rx="6" fill="rgba(15,23,42,0.85)" stroke="rgba(255,255,255,0.1)"/>
+  <text x="535" y="40" fill="#94a3b8" font-family="sans-serif" font-size="10">TRIGGER: 500 mV / DIV</text>
+  <text x="535" y="55" fill="#f8fafc" font-family="monospace" font-size="11" font-weight="bold">JITTER: 14.2 ps RMS</text>
+</svg>

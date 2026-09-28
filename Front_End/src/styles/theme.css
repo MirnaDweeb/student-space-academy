@@ -1,0 +1,772 @@
+:root {
+  /* =========================================================================
+     OFFICIAL EGSA BRAND TOKENS (Preserved & Enhanced)
+     ========================================================================= */
+  --color-primary: #3A6985;         /* Deep Cosmos Blue */
+  --color-primary-dark: #2A4F65;    /* Deep Celestial Blue */
+  --color-primary-light: #52829F;   /* Light Cosmos Blue */
+  --color-primary-subtle: rgba(58, 105, 133, 0.08);
+
+  --color-secondary: #1E7C85;       /* Deep Satellite Teal */
+  --color-secondary-dark: #166067;  /* Dark Satellite Teal */
+  --color-secondary-light: #2BA0AB; /* Light Satellite Teal */
+  --color-secondary-subtle: rgba(30, 124, 133, 0.08);
+
+  --color-accent: #D4B87C;          /* Egyptian Gold-Tan */
+  --color-accent-dark: #B89956;     /* Burnished Gold */
+  --color-accent-light: #E5CCA0;    /* Celestial Gold Light */
+  --color-accent-subtle: rgba(212, 184, 124, 0.12);
+
+  --color-danger: #DF4F4C;          /* Aerospace Coral / Alert */
+  --color-danger-subtle: rgba(223, 79, 76, 0.08);
+  --color-warning: #E09F3E;         /* Orbital Warning Amber */
+  --color-warning-subtle: rgba(224, 159, 62, 0.1);
+  --color-success: #1E7C85;         /* Success aligns with EGSA Teal */
+  --color-success-subtle: rgba(30, 124, 133, 0.1);
+
+  /* High-end Institutional Neutrals */
+  --color-black: #0E1A22;           /* Deep Space Slate (replaces harsh #000) */
+  --color-white: #FFFFFF;
+  --color-background: #F8FAFB;      /* Crisp clean light surface */
+  --color-surface: #FFFFFF;
+  --color-surface-elevated: #FFFFFF;
+  --color-surface-subtle: #F1F5F7;
+  --color-border: #DDE4E8;          /* Refined precision border */
+  --color-border-subtle: #EDF2F4;
+  --color-border-strong: #BDCBD2;
+  --color-text-main: #14232C;
+  --color-text-muted: #5A6D78;
+  --color-text-subtle: #8799A5;
+
+  /* Typography Scales */
+  --font-en: "Montserrat", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-ar: "Cairo", "Tajawal", -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+
+  /* Elevation & Shadows (Subtle, architectural, never muddy) */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 9999px;
+
+  --shadow-sm: 0 1px 2px rgba(14, 26, 34, 0.04);
+  --shadow-subtle: 0 2px 8px rgba(14, 26, 34, 0.05), 0 1px 2px rgba(14, 26, 34, 0.02);
+  --shadow-md: 0 4px 16px -2px rgba(14, 26, 34, 0.06), 0 2px 6px -1px rgba(14, 26, 34, 0.03);
+  --shadow-lg: 0 12px 32px -4px rgba(14, 26, 34, 0.08), 0 4px 12px -2px rgba(14, 26, 34, 0.03);
+  --shadow-focus: 0 0 0 3px rgba(58, 105, 133, 0.2);
+
+  /* Transitions */
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* =========================================================================
+   GLOBAL RESET & INSTITUTIONAL BASE
+   ========================================================================= */
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-background);
+  color: var(--color-text-main);
+  font-family: var(--font-en);
+  font-size: 0.9375rem; /* 15px base for high legibility */
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html[dir="rtl"] body {
+  font-family: var(--font-ar);
+}
+
+/* Typography Hierarchy */
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-en);
+  font-weight: 700;
+  color: var(--color-black);
+  letter-spacing: -0.02em;
+  margin-top: 0;
+}
+
+html[dir="rtl"] h1, html[dir="rtl"] h2, html[dir="rtl"] h3,
+html[dir="rtl"] h4, html[dir="rtl"] h5, html[dir="rtl"] h6 {
+  font-family: var(--font-ar);
+  letter-spacing: 0;
+}
+
+h1 { font-size: 1.75rem; line-height: 1.25; }
+h2 { font-size: 1.5rem; line-height: 1.3; }
+h3 { font-size: 1.25rem; line-height: 1.35; }
+h4 { font-size: 1.1rem; line-height: 1.4; }
+h5 { font-size: 1rem; line-height: 1.45; }
+h6 { font-size: 0.875rem; line-height: 1.5; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+
+p {
+  margin-top: 0;
+  margin-bottom: 0.75rem;
+}
+
+a {
+  color: var(--color-primary);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+a:hover {
+  color: var(--color-secondary);
+}
+
+/* Monospace & Data Chips */
+.font-mono, .code-label, .telemetry-code {
+  font-family: var(--font-mono);
+  letter-spacing: 0.03em;
+}
+
+/* =========================================================================
+   BOOTSTRAP OVERRIDES -> EGSA TOKENS
+   ========================================================================= */
+.btn {
+  font-family: var(--font-en);
+  font-weight: 600;
+  font-size: 0.875rem;
+  padding: 0.5rem 1.1rem;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  letter-spacing: 0.01em;
+}
+
+.btn-sm {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.8125rem;
+  border-radius: var(--radius-xs);
+}
+
+.btn-lg {
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  border-radius: var(--radius-md);
+}
+
+.btn-primary {
+  background-color: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #ffffff;
+  box-shadow: 0 1px 2px rgba(58, 105, 133, 0.15);
+}
+
+.btn-primary:hover, .btn-primary:focus {
+  background-color: var(--color-primary-dark);
+  border-color: var(--color-primary-dark);
+  color: #ffffff;
+  box-shadow: 0 2px 4px rgba(58, 105, 133, 0.25);
+}
+
+.btn-outline-primary {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  background-color: transparent;
+}
+
+.btn-outline-primary:hover, .btn-outline-primary:focus {
+  background-color: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #ffffff;
+}
+
+.btn-secondary, .btn-egsa-teal {
+  background-color: var(--color-secondary);
+  border-color: var(--color-secondary);
+  color: #ffffff;
+}
+
+.btn-secondary:hover, .btn-secondary:focus {
+  background-color: var(--color-secondary-dark);
+  border-color: var(--color-secondary-dark);
+  color: #ffffff;
+}
+
+.btn-accent {
+  background-color: var(--color-accent);
+  border-color: var(--color-accent-dark);
+  color: var(--color-black);
+  font-weight: 600;
+}
+
+.btn-accent:hover, .btn-accent:focus {
+  background-color: var(--color-accent-dark);
+  border-color: var(--color-accent-dark);
+  color: #ffffff;
+}
+
+.btn-light {
+  background-color: #ffffff;
+  border-color: var(--color-border);
+  color: var(--color-text-main);
+}
+
+.btn-light:hover {
+  background-color: var(--color-surface-subtle);
+  border-color: var(--color-border-strong);
+  color: var(--color-black);
+}
+
+/* Forms */
+.form-control, .form-select {
+  font-family: var(--font-en);
+  font-size: 0.875rem;
+  color: var(--color-text-main);
+  background-color: #ffffff;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.85rem;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.form-control:focus, .form-select:focus {
+  border-color: var(--color-primary);
+  box-shadow: var(--shadow-focus);
+  outline: none;
+}
+
+.form-label {
+  font-weight: 600;
+  font-size: 0.8125rem;
+  color: var(--color-text-main);
+  margin-bottom: 0.35rem;
+}
+
+/* =========================================================================
+   EGSA INSTITUTIONAL CARD SYSTEM
+   ========================================================================= */
+.egsa-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.egsa-card:hover {
+  border-color: var(--color-border-strong);
+}
+
+.egsa-card-interactive {
+  cursor: pointer;
+}
+
+.egsa-card-interactive:hover {
+  border-color: var(--color-primary-light);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+/* Hero Banner - Scientific & Institutional */
+.egsa-hero {
+  background: linear-gradient(130deg, #1A3644 0%, #254A5E 45%, #1E7C85 100%);
+  color: #ffffff;
+  border-radius: var(--radius-lg);
+  padding: 2.25rem;
+  position: relative;
+  overflow: hidden;
+  box-shadow: var(--shadow-md);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.egsa-hero::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background-image: radial-gradient(rgba(212, 184, 124, 0.15) 1px, transparent 1px);
+  background-size: 24px 24px;
+  pointer-events: none;
+  opacity: 0.45;
+}
+
+/* =========================================================================
+   STATUS BADGES & INDICATORS (Color + Icon + Human Meaning)
+   ========================================================================= */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.65rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.775rem;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.status-badge.ready {
+  background-color: var(--color-secondary-subtle);
+  border-color: rgba(30, 124, 133, 0.25);
+  color: var(--color-secondary-dark);
+}
+
+.status-badge.pending {
+  background-color: var(--color-primary-subtle);
+  border-color: rgba(58, 105, 133, 0.25);
+  color: var(--color-primary-dark);
+}
+
+.status-badge.gold {
+  background-color: var(--color-accent-subtle);
+  border-color: rgba(212, 184, 124, 0.4);
+  color: #8C6F2A;
+}
+
+.status-badge.error {
+  background-color: var(--color-danger-subtle);
+  border-color: rgba(223, 79, 76, 0.25);
+  color: var(--color-danger);
+}
+
+/* Progress Track */
+.progress-track {
+  height: 6px;
+  background-color: var(--color-border-subtle);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  position: relative;
+}
+
+.progress-fill {
+  height: 100%;
+  background-color: var(--color-secondary);
+  border-radius: var(--radius-pill);
+  transition: width 0.4s ease;
+}
+
+/* Path / Stepper Node */
+.path-node {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.path-node .dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  flex-shrink: 0;
+  border: 2px solid #ffffff;
+  box-shadow: var(--shadow-sm);
+}
+
+.path-node .dot.completed {
+  background-color: var(--color-secondary);
+}
+
+.path-node .dot.current {
+  background-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(58, 105, 133, 0.2);
+}
+
+.path-node .dot.upcoming {
+  background-color: var(--color-surface-subtle);
+  color: var(--color-text-subtle);
+  border-color: var(--color-border);
+}
+
+.path-connector {
+  width: 2px;
+  background-color: var(--color-border);
+  height: 22px;
+  margin-inline-start: 13px;
+}
+
+/* Utility Helpers */
+.text-primary-egsa { color: var(--color-primary) !important; }
+.text-secondary-egsa { color: var(--color-secondary) !important; }
+.text-accent-egsa { color: var(--color-accent-dark) !important; }
+.text-danger-egsa { color: var(--color-danger) !important; }
+.text-muted-egsa { color: var(--color-text-muted) !important; }
+
+.bg-primary-egsa { background-color: var(--color-primary) !important; color: #ffffff; }
+.bg-secondary-egsa { background-color: var(--color-secondary) !important; color: #ffffff; }
+.bg-accent-egsa { background-color: var(--color-accent) !important; color: var(--color-black); }
+
+/* Line Clamp Utilities */
+.text-truncate-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.text-truncate-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Micro-Telemetry Badge */
+.telemetry-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  background-color: var(--color-surface-subtle);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+}
+
+.telemetry-chip.pulse .status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--color-secondary);
+  display: inline-block;
+  box-shadow: 0 0 0 2px rgba(30, 124, 133, 0.25);
+  animation: telemetryPulse 2s infinite ease-in-out;
+}
+
+@keyframes telemetryPulse {
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(30, 124, 133, 0.5); }
+  70% { transform: scale(1.15); box-shadow: 0 0 0 6px rgba(30, 124, 133, 0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(30, 124, 133, 0); }
+}
+
+/* =========================================================================
+   AEROSPACE MISSION COCKPIT & TRAJECTORY SIGNATURE STYLES
+   ========================================================================= */
+.mission-cockpit-hero {
+  background: linear-gradient(135deg, #0E1A22 0%, #152733 55%, #1B394A 100%);
+  border: 1px solid rgba(58, 105, 133, 0.35);
+  border-radius: var(--radius-lg);
+  color: #FFFFFF;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 10px 32px rgba(14, 26, 34, 0.16);
+  padding: 2rem 2.25rem;
+}
+
+.mission-cockpit-hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: 
+    radial-gradient(rgba(212, 184, 124, 0.14) 1px, transparent 1px),
+    linear-gradient(to right, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-size: 28px 28px, 56px 56px, 56px 56px;
+  pointer-events: none;
+  opacity: 0.65;
+}
+
+/* Trajectory Stepper Bar */
+.trajectory-container {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 1.25rem 1.5rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.trajectory-steps {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: relative;
+  gap: 0.5rem;
+  overflow-x: auto;
+  padding-bottom: 0.25rem;
+}
+
+.trajectory-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+  min-width: 95px;
+  text-align: center;
+  flex: 1;
+}
+
+.trajectory-step-indicator {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.825rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  z-index: 2;
+  transition: all var(--transition-fast);
+  border: 2px solid #FFFFFF;
+}
+
+.trajectory-step.completed .trajectory-step-indicator {
+  background-color: var(--color-secondary);
+  color: #FFFFFF;
+  box-shadow: 0 2px 6px rgba(30, 124, 133, 0.25);
+}
+
+.trajectory-step.active .trajectory-step-indicator {
+  background-color: var(--color-primary);
+  color: #FFFFFF;
+  box-shadow: 0 0 0 4px rgba(58, 105, 133, 0.22);
+  animation: activeOrbitalRing 2.5s infinite ease-in-out;
+}
+
+@keyframes activeOrbitalRing {
+  0% { box-shadow: 0 0 0 3px rgba(58, 105, 133, 0.3); }
+  50% { box-shadow: 0 0 0 6px rgba(58, 105, 133, 0.1); }
+  100% { box-shadow: 0 0 0 3px rgba(58, 105, 133, 0.3); }
+}
+
+.trajectory-step.upcoming .trajectory-step-indicator {
+  background-color: var(--color-surface-subtle);
+  border-color: var(--color-border);
+  color: var(--color-text-subtle);
+}
+
+.trajectory-step.locked .trajectory-step-indicator {
+  background-color: var(--color-surface-subtle);
+  border-color: var(--color-border);
+  color: var(--color-text-subtle);
+  opacity: 0.7;
+}
+
+.trajectory-step-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-main);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.trajectory-step.active .trajectory-step-title {
+  color: var(--color-primary);
+  font-weight: 700;
+}
+
+.trajectory-step.upcoming .trajectory-step-title,
+.trajectory-step.locked .trajectory-step-title {
+  color: var(--color-text-subtle);
+}
+
+.trajectory-step-subtitle {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+/* Skeleton Loading Shimmer */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(90deg, #edf2f5 25%, #f8fafb 50%, #edf2f5 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: var(--radius-sm);
+}
+
+/* Mission Gate Alert Box */
+.mission-gate-alert {
+  background: #FFFFFF;
+  border: 1px solid var(--color-border);
+  border-inline-start: 4px solid var(--color-accent-dark);
+  border-radius: var(--radius-md);
+  padding: 1.15rem 1.35rem;
+  box-shadow: var(--shadow-sm);
+  position: relative;
+}
+
+.mission-gate-alert.urgent {
+  border-inline-start-color: var(--color-danger);
+  background: linear-gradient(to right, rgba(223, 79, 76, 0.03), transparent);
+}
+
+.mission-gate-alert.info {
+  border-inline-start-color: var(--color-primary);
+}
+
+/* =========================================================================
+   EGSA AUTHENTICATION & REGISTRATION SUITE (Aerospace Precision)
+   ========================================================================= */
+
+/* RTL Typography & Direction */
+[dir="rtl"] {
+  font-family: var(--font-ar);
+  text-align: right;
+}
+
+[dir="rtl"] .font-monospace {
+  direction: ltr;
+  text-align: left;
+}
+
+[dir="rtl"] .auth-section-divider::after {
+  margin-left: 0;
+  margin-right: 0.75rem;
+}
+
+.auth-container-wrapper {
+  min-height: calc(100vh - 140px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2.5rem 1rem;
+}
+
+.auth-card-shell {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  width: 100%;
+}
+
+.auth-hero-banner {
+  background: linear-gradient(135deg, #0B192C 0%, #173B56 60%, #1E7C85 100%);
+  color: #FFFFFF;
+  padding: 3rem 2.5rem;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.auth-hero-banner::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-image: 
+    radial-gradient(rgba(212, 184, 124, 0.15) 1px, transparent 1px),
+    radial-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px);
+  background-size: 24px 24px, 48px 48px;
+  background-position: 0 0, 12px 12px;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.auth-section-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1.75rem 0 1.25rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-primary);
+}
+
+.auth-section-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--color-border-subtle);
+}
+
+.auth-section-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-pill);
+  background: var(--color-primary-subtle);
+  color: var(--color-primary);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.password-strength-container {
+  margin-top: 0.5rem;
+}
+
+.password-meter-track {
+  height: 4px;
+  background: var(--color-border-subtle);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  display: flex;
+  gap: 3px;
+}
+
+.password-meter-segment {
+  flex: 1;
+  height: 100%;
+  background: transparent;
+  transition: background-color var(--transition-normal);
+}
+
+.password-checklist {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 0.35rem 0.75rem;
+  margin-top: 0.65rem;
+  font-size: 0.75rem;
+}
+
+.password-req-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--color-text-subtle);
+  transition: color var(--transition-fast);
+}
+
+.password-req-item.met {
+  color: var(--color-secondary);
+  font-weight: 600;
+}
+
+.lang-switch-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.85rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-main);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.lang-switch-pill:hover {
+  background: var(--color-surface-subtle);
+  border-color: var(--color-primary-light);
+  color: var(--color-primary);
+}
+

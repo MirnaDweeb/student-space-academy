@@ -1,0 +1,74 @@
+/* Student Layout Styles */
+.student-portal-wrapper {
+  display: flex;
+  min-height: 100vh;
+  background-color: var(--color-background);
+  color: var(--color-black);
+}
+
+/* Main content wrapper - automatically adapts to sidebar width */
+.student-main-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin-left: 260px;
+  transition: margin-left 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  min-height: 100vh;
+}
+
+.student-main-wrapper.sidebar-collapsed {
+  margin-left: 80px;
+}
+
+/* Top Header */
+.student-top-header {
+  height: 70px;
+  background-color: #ffffff;
+  border-bottom: 1px solid var(--color-border);
+  padding: 0 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 1020;
+  box-shadow: 0 2px 8px rgba(58, 105, 133, 0.03);
+}
+
+.header-page-title {
+  font-family: var(--font-en);
+  letter-spacing: -0.2px;
+}
+
+.profile-shortcut-btn {
+  background-color: rgba(58, 105, 133, 0.05);
+  border: 1px solid var(--color-border);
+  transition: background-color 0.15s ease;
+}
+
+.profile-shortcut-btn:hover {
+  background-color: rgba(58, 105, 133, 0.12);
+}
+
+/* Content Container */
+.student-content-container {
+  flex: 1;
+  padding: 1.75rem 1.5rem 3rem 1.5rem;
+  max-width: 1400px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* Responsive adjustments */
+@media (max-width: 991.98px) {
+  .student-main-wrapper {
+    margin-left: 0 !important;
+  }
+  .student-top-header {
+    padding: 0 1rem;
+  }
+  .student-content-container {
+    padding: 1.25rem 1rem 2rem 1rem;
+  }
+}
