@@ -26,8 +26,12 @@ export default function ProtectedRoute({ allowedRoles = ['student'] }) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  // Role authorization
-  if (allowedRoles && allowedRoles.length > 0 && !allowedRoles.includes(user.role)) {
+  // Role authorization (superadmin inherits admin permissions)
+  const effectiveRoles = [...allowedRoles];
+  if (effectiveRoles.includes('admin') && !effectiveRoles.includes('superadmin')) {
+    effectiveRoles.push('superadmin');
+  }
+  if (effectiveRoles.length > 0 && !effectiveRoles.includes(user.role)) {
     return (
       <div className="container py-5 text-center">
         <div className="card shadow-sm border-0 p-5 mx-auto" style={{ maxWidth: 480 }}>

@@ -35,37 +35,11 @@ function baseSetup({ cohort, reservedResult }) {
   return course;
 }
 
-describe('createApplication - atomic cohort seat reservation', () => {
+describe('createApplication - admissions lifecycle enforcement', () => {
   afterEach(() => jest.clearAllMocks());
 
-  test('reserves a seat atomically and marks the application Eligible - Payment Pending when a seat is available', async () => {
+  test('creates an application with status Submitted without prematurely reserving seats or issuing invoices', async () => {
     const cohort = { _id: 'cohort-1', capacity: 30, seatsTaken: 10 };
-    baseSetup({ cohort, reservedResult: { _id: 'cohort-1', capacity: 30, seatsTaken: 11 } });
-
-    const req = { body: { courseId: 'course-1', readinessAttemptId: 'attempt-1' }, user: { _id: 'student-1' } };
-    const res = mockRes();
-    const next = jest.fn();
-
-    await createApplication(req, res, next);
-
-    expect(next).not.toHaveBeenCalled();
-    // The reservation must be a single conditional update, not a separate check-then-increment.
-    expect(Cohort.findOneAndUpdate).toHaveBeenCalledWith(
-      { _id: 'cohort-1', $expr: { $lt: ['$seatsTaken', '$capacity'] } },
-      { $inc: { seatsTaken: 1 } },
-      { new: true }
-    );
-    expect(Application.create).toHaveBeenCalledWith(
-      expect.objectContaining({ status: 'Eligible - Payment Pending' })
-    );
-    expect(issueInvoice).toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(201);
-  });
-
-  test('waitlists the application when the atomic reservation finds no seat left (lost the race)', async () => {
-    const cohort = { _id: 'cohort-1', capacity: 30, seatsTaken: 30 };
-    // findOneAndUpdate returns null: the $expr condition failed because another
-    // request took the last seat between the findOne and this write.
     baseSetup({ cohort, reservedResult: null });
 
     const req = { body: { courseId: 'course-1', readinessAttemptId: 'attempt-1' }, user: { _id: 'student-1' } };
@@ -75,49 +49,59 @@ describe('createApplication - atomic cohort seat reservation', () => {
     await createApplication(req, res, next);
 
     expect(next).not.toHaveBeenCalled();
-    expect(Application.create).toHaveBeenCalledWith(
-      expect.objectContaining({ status: 'Waitlisted' })
-    );
+    // Seats are NOT reserved on submission; they are reserved upon Admin review & seat allocation
+    expect(Cohort.findOneAndUpdate).not.toHaveBeenCalled();
+    // Invoices are NOT issued on submission; issued upon Acceptance
     expect(issueInvoice).not.toHaveBeenCalled();
+    expect(Application.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'Submitted',
+        eligibilityStatus: 'Eligible',
+      })
+    );
+    expect(res.status).toHaveBeenCalledWith(201);
   });
 
-  test('two concurrent requests for the last seat cannot both succeed', async () => {
-    const cohort = { _id: 'cohort-1', capacity: 1, seatsTaken: 0 };
-    const course = baseSetup({ cohort, reservedResult: null });
+  test('sets eligibilityStatus to Not Started when no readiness attempt is provided and course has assessment', async () => {
+    const cohort = { _id: 'cohort-1', capacity: 30, seatsTaken: 10 };
+    baseSetup({ cohort, reservedResult: null });
+    ReadinessAttempt.findOne.mockReturnValue({ sort: jest.fn().mockResolvedValue(null) });
+    const ReadinessQuestion = require('../src/models/ReadinessQuestion');
+    ReadinessQuestion.exists = jest.fn().mockResolvedValue(true);
 
-    // Simulate: first call's atomic update succeeds, second call's fails,
-    // as would happen with a real DB enforcing the $expr condition.
-    Cohort.findOneAndUpdate
-      .mockResolvedValueOnce({ _id: 'cohort-1', capacity: 1, seatsTaken: 1 })
-      .mockResolvedValueOnce(null);
-
-    const req1 = { body: { courseId: course._id, readinessAttemptId: 'attempt-1' }, user: { _id: 'student-1' } };
-    const req2 = { body: { courseId: course._id, readinessAttemptId: 'attempt-1' }, user: { _id: 'student-2' } };
-    const res1 = mockRes();
-    const res2 = mockRes();
-
-    await Promise.all([
-      createApplication(req1, res1, jest.fn()),
-      createApplication(req2, res2, jest.fn()),
-    ]);
-
-    const statuses = Application.create.mock.calls.map((call) => call[0].status);
-    expect(statuses).toEqual(expect.arrayContaining(['Eligible - Payment Pending', 'Waitlisted']));
-    expect(issueInvoice).toHaveBeenCalledTimes(1);
-  });
-
-  test('proceeds without seat enforcement when no cohort exists yet for the course (missing capacity data)', async () => {
-    baseSetup({ cohort: null, reservedResult: null });
-
-    const req = { body: { courseId: 'course-1', readinessAttemptId: 'attempt-1' }, user: { _id: 'student-1' } };
+    const req = { body: { courseId: 'course-1' }, user: { _id: 'student-1' } };
     const res = mockRes();
     const next = jest.fn();
 
     await createApplication(req, res, next);
 
-    expect(Cohort.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
     expect(Application.create).toHaveBeenCalledWith(
-      expect.objectContaining({ status: 'Eligible - Payment Pending' })
+      expect.objectContaining({
+        status: 'Submitted',
+        eligibilityStatus: 'Not Started',
+      })
+    );
+    expect(res.status).toHaveBeenCalledWith(201);
+  });
+
+  test('sets status to Foundation Recommended if readiness outcome is FOUNDATION_REQUIRED', async () => {
+    const cohort = { _id: 'cohort-1', capacity: 30, seatsTaken: 10 };
+    baseSetup({ cohort, reservedResult: null });
+    ReadinessAttempt.findOne.mockResolvedValue({ _id: 'attempt-2', outcome: 'FOUNDATION_REQUIRED' });
+
+    const req = { body: { courseId: 'course-1', readinessAttemptId: 'attempt-2' }, user: { _id: 'student-1' } };
+    const res = mockRes();
+    const next = jest.fn();
+
+    await createApplication(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(Application.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'Foundation Recommended',
+        eligibilityStatus: 'Not Eligible',
+      })
     );
   });
 
@@ -128,6 +112,11 @@ describe('createApplication - atomic cohort seat reservation', () => {
     const req = { body: { courseId: 'course-2' }, user: { _id: 'student-1' } };
     const res = mockRes();
     const next = jest.fn();
+
+    await createApplication(req, res, next);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringMatching(/pricing/i) }));
+    expect(Application.create).not.toHaveBeenCalled();
 
     await createApplication(req, res, next);
 

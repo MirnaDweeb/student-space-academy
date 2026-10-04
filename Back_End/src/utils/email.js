@@ -1,14 +1,83 @@
 const nodemailer = require('nodemailer');
 
+function isSmtpConfigured() {
+  const host = (process.env.SMTP_HOST || '').trim();
+  const user = (process.env.SMTP_USER || '').trim();
+  const pass = (process.env.SMTP_PASS || process.env.SMTP_PASSWORD || '').trim();
+
+  if (!host || host === 'smtp.example.com' || host === 'localhost') return false;
+  if (!user || user === 'user@example.com') return false;
+  if (!pass || pass === 'changeme') return false;
+  return true;
+}
+
 function buildTransport() {
-  if (!process.env.SMTP_HOST || process.env.SMTP_HOST === 'smtp.example.com') return null;
+  if (!isSmtpConfigured()) return null;
+
+  const host = (process.env.SMTP_HOST || '').trim();
+  const port = Number(process.env.SMTP_PORT) || 587;
+  const user = (process.env.SMTP_USER || '').trim();
+  const pass = (process.env.SMTP_PASS || process.env.SMTP_PASSWORD || '').trim();
+  const isSecure = port === 465;
+
   return nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT) || 587,
-    auth: process.env.SMTP_USER && process.env.SMTP_USER !== 'user@example.com'
-      ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD }
-      : undefined,
+    host,
+    port,
+    secure: isSecure,
+    auth: {
+      user,
+      pass,
+    },
+    tls: {
+      rejectUnauthorized: process.env.NODE_ENV === 'production',
+    },
   });
+}
+
+async function verifySmtpConnection() {
+  if (!isSmtpConfigured()) {
+    const host = (process.env.SMTP_HOST || '').trim();
+    const user = (process.env.SMTP_USER || '').trim();
+    const pass = (process.env.SMTP_PASS || process.env.SMTP_PASSWORD || '').trim();
+    const reasons = [];
+    if (!host || host === 'smtp.example.com') reasons.push('SMTP_HOST is missing or placeholder (smtp.example.com)');
+    if (!user || user === 'user@example.com') reasons.push('SMTP_USER is missing or placeholder (user@example.com)');
+    if (!pass || pass === 'changeme') reasons.push('SMTP_PASS is missing or placeholder (changeme)');
+
+    return {
+      configured: false,
+      verified: false,
+      message: `SMTP not configured in .env: ${reasons.join(', ')}`,
+      error: reasons.join(', '),
+    };
+  }
+
+  const transport = buildTransport();
+  if (!transport) {
+    return {
+      configured: false,
+      verified: false,
+      message: 'Failed to create SMTP transporter.',
+      error: 'Transporter creation failed',
+    };
+  }
+
+  try {
+    await transport.verify();
+    return {
+      configured: true,
+      verified: true,
+      message: 'SMTP connection verified successfully.',
+    };
+  } catch (err) {
+    const isAuth = err.code === 'EAUTH' || err.responseCode === 535 || (err.message && err.message.includes('Username and Password'));
+    return {
+      configured: true,
+      verified: false,
+      isAuthFailure: isAuth,
+      error: isAuth ? 'SMTP authentication failed (invalid credentials)' : (err.message || 'SMTP connection failed'),
+    };
+  }
 }
 
 function getBaseTemplate({ titleEn, titleAr, contentHtml, actionUrl, actionTextEn, actionTextAr }) {
@@ -39,6 +108,7 @@ function getBaseTemplate({ titleEn, titleAr, contentHtml, actionUrl, actionTextE
 <body>
   <div class="container">
     <div class="header">
+      <img src="${(process.env.CLIENT_URL || 'http://localhost:5173').replace(/\/$/, '')}/assets/logo.png" alt="EGSA Logo" width="60" height="60" style="display:block;margin:0 auto 10px;border:0;outline:none;object-fit:contain;" onerror="this.style.display='none'" />
       <div class="logo-badge">Egyptian Space Agency</div>
       <h1>EGSA Space Academy</h1>
       <p>Smart Training & Space Capabilities Platform</p>
@@ -70,23 +140,50 @@ function getBaseTemplate({ titleEn, titleAr, contentHtml, actionUrl, actionTextE
 }
 
 async function sendEmail({ to, subject, html, text }) {
+  const user = (process.env.SMTP_USER || '').trim();
+  const configuredFrom = (process.env.SMTP_FROM || '').trim();
+  const from = configuredFrom || (user ? `Egyptian Space Agency - Space Academy <${user}>` : 'Egyptian Space Agency - Space Academy <no-reply@egsa-academy.example>');
+
+  if (!isSmtpConfigured()) {
+    console.log(`[mail] Cannot send email to ${to}: SMTP not configured or using default placeholders in .env`);
+    return {
+      success: false,
+      simulated: true,
+      reason: 'SMTP configuration is missing or using placeholder values in .env',
+    };
+  }
+
   const transport = buildTransport();
   if (!transport) {
-    console.log(`\n======================================================`);
-    console.log(`[EMAIL:DEV MODE / CONSOLE DISPATCH]`);
-    console.log(`To: ${to}`);
-    console.log(`Subject: ${subject}`);
-    console.log(`Content Snippet:\n${text || html.slice(0, 300)}...`);
-    console.log(`======================================================\n`);
-    return { simulated: true };
+    console.log(`[mail] Cannot send email to ${to}: Transporter build failed`);
+    return {
+      success: false,
+      reason: 'Failed to initialize SMTP transporter',
+    };
   }
-  return transport.sendMail({
-    from: process.env.SMTP_FROM || 'EGSA Space Academy <no-reply@egsa-academy.example>',
-    to,
-    subject,
-    html,
-    text,
-  });
+
+  try {
+    const info = await transport.sendMail({
+      from,
+      to,
+      subject,
+      html,
+      text,
+    });
+    console.log(`[mail] Message accepted, id: ${info.messageId}`);
+    return {
+      success: true,
+      messageId: info.messageId,
+      accepted: info.accepted,
+      rejected: info.rejected,
+      response: info.response,
+    };
+  } catch (err) {
+    const isAuth = err.code === 'EAUTH' || err.responseCode === 535 || (err.message && err.message.includes('Username and Password'));
+    const sanitizedError = isAuth ? 'SMTP authentication failed' : (err.message || 'SMTP transmission error');
+    console.error(`[mail] Failed to send email to ${to}: ${sanitizedError}`);
+    throw new Error(sanitizedError);
+  }
 }
 
 /**
@@ -156,48 +253,89 @@ async function sendPasswordResetEmail({ to, fullName, resetUrl }) {
 }
 
 /**
- * Sends institutional bilingual registration confirmation message (Email 2)
+ * Sends official institutional registration confirmation email
  */
-async function sendRegistrationConfirmationEmail({ to, fullName, registrationNumber, email, preferredLanguage = 'en' }) {
-  const titleEn = 'Registration Successfully Received — EGSA Space Academy';
-  const titleAr = 'تأكيد استلام طلب التسجيل — أكاديمية الفضاء المصرية';
+async function sendRegistrationConfirmationEmail({ to, fullName, email, verificationUrl }) {
+  const recipientEmail = (email || to || '').trim().toLowerCase();
+  if (!recipientEmail) {
+    throw new Error('Recipient email is missing or empty.');
+  }
+  const studentName = (fullName || 'Space Academy Candidate').trim();
   const clientUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:5173';
 
+  const titleEn = verificationUrl
+    ? 'Confirm Registration & Verify Email — EGSA Space Academy'
+    : 'Registration Confirmation — Egyptian Space Agency Space Academy';
+  const titleAr = verificationUrl
+    ? 'تأكيد التسجيل وتفعيل الحساب — أكاديمية الفضاء المصرية'
+    : 'تأكيد التسجيل — أكاديمية الفضاء المصرية';
+
   const contentHtml = `
-    <div style="background: #EBF3F5; border-left: 4px solid #1E7C85; padding: 14px 18px; border-radius: 6px; margin-bottom: 20px;">
-      <strong style="color: #0E1A22; font-size: 15px;">Registration Reference: <span style="font-family: monospace; color: #1E7C85; font-size: 16px;">${registrationNumber || 'EGSA-CADET'}</span></strong>
-    </div>
-
-    <p>Dear <strong>${fullName || 'Space Cadet'}</strong>,</p>
-    <p>We are pleased to inform you that your registration for the <strong>EGSA Space Academy</strong> has been successfully received by the agency.</p>
-    <p>Your candidate profile has been registered in the national space training registry under email <strong>${email || to}</strong>.</p>
+    <p>Dear <strong>${studentName}</strong>,</p>
+    <p>Thank you for registering with the <strong>Egyptian Space Agency Space Academy</strong>.</p>
+    <p>Your account registration has been received successfully.</p>
     
-    <div style="background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px; margin: 20px 0;">
-      <h4 style="margin: 0 0 10px; color: #1E7C85; font-size: 15px;">Next Step:</h4>
-      <p style="margin: 0; color: #334155; font-size: 14px;">Log in to the Student Portal to complete your profile, explore available space training programs, and submit your course applications.</p>
+    <div style="background: #F1F5F7; border: 1px solid #DDE4E8; border-left: 4px solid #1E7C85; border-radius: 6px; padding: 14px 18px; margin: 20px 0;">
+      <p style="margin: 0; color: #5A6D78; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;">Registered email:</p>
+      <p style="margin: 4px 0 0; color: #0E1A22; font-size: 16px; font-weight: 700; font-family: monospace;">${recipientEmail}</p>
     </div>
 
-    <div style="direction: rtl; text-align: right; margin-top: 24px; padding-top: 18px; border-top: 1px solid #EDF2F4; color: #334155; font-size: 14px; font-family: 'Cairo', Tahoma, sans-serif;">
-      <p>عزيزي/عزيزتي <strong>${fullName || ''}</strong>،</p>
-      <p>يسعدنا إفادتكم بأنه تم استلام تسجيلكم في <strong>أكاديمية الفضاء المصرية</strong> بنجاح وتسجيل بياناتكم في المنظومة الوطنية للتأهيل الفضائي برقم مرجعي: <strong>${registrationNumber || 'EGSA-CADET'}</strong>.</p>
-      <p><strong>الخطوة التالية:</strong> تسجيل الدخول إلى البوابة واستكشاف البرامج التدريبية المتاحة وتقديم طلبات الالتحاق.</p>
+    ${verificationUrl ? `
+      <p style="font-weight: 600; color: #0E1A22;">To complete your registration and activate your student portal account, please verify your email address by clicking the verification button below:</p>
+    ` : `
+      <p>Your registration has been received successfully. Future updates regarding your academy activities will be sent to this email address.</p>
+      <p>Please use the same email address when signing in to the Space Academy platform.</p>
+    `}
+    
+    <div style="direction: rtl; text-align: right; margin-top: 28px; padding-top: 20px; border-top: 1px solid #EDF2F4; color: #334155; font-size: 14px; font-family: 'Cairo', Tahoma, sans-serif;">
+      <p>عزيزي/عزيزتي <strong>${studentName}</strong>،</p>
+      <p>شكراً لتسجيلك في <strong>أكاديمية الفضاء المصرية</strong>.</p>
+      <p>تم استلام طلب تسجيلكم بنجاح.</p>
+      <div style="background: #FFFFFF; border: 1px solid #DDE4E8; border-right: 4px solid #1E7C85; border-radius: 6px; padding: 12px 16px; margin: 16px 0;">
+        <p style="margin: 0; color: #5A6D78; font-size: 12px; font-weight: 600;">البريد الإلكتروني المسجل:</p>
+        <p style="margin: 4px 0 0; color: #0E1A22; font-size: 15px; font-weight: 700; font-family: monospace; direction: ltr; text-align: right;">${recipientEmail}</p>
+      </div>
+      ${verificationUrl ? `
+        <p style="font-weight: 600; color: #0E1A22;">لتفعيل حسابكم وبدء التقدم للبرامج الفضائية، يُرجى النقر على زر تأكيد البريد الإلكتروني أدناه.</p>
+      ` : `
+        <p>تم استلام طلب تسجيلكم بنجاح. سيتم إرسال كافة التحديثات المستقبلية المتعلقة بالأنشطة الأكاديمية إلى هذا البريد الإلكتروني.</p>
+        <p>يرجى استخدام هذا البريد الإلكتروني لتسجيل الدخول إلى منصة الأكاديمية.</p>
+      `}
     </div>
+
+    <p style="margin-top: 24px; color: #14232C; font-size: 14px;">Best regards,<br><br><strong>Egyptian Space Agency</strong><br>Space Academy</p>
   `;
 
   const html = getBaseTemplate({
     titleEn,
     titleAr,
     contentHtml,
-    actionUrl: `${clientUrl}/login`,
-    actionTextEn: 'Explore Programs',
-    actionTextAr: 'استكشاف البرامج',
+    actionUrl: verificationUrl || `${clientUrl}/login`,
+    actionTextEn: verificationUrl ? 'Verify Email Address' : 'Sign In to Portal',
+    actionTextAr: verificationUrl ? 'تأكيد البريد الإلكتروني' : 'تسجيل الدخول للمنصة',
   });
 
+  const text = `Dear ${studentName},
+
+Thank you for registering with the Egyptian Space Agency Space Academy.
+
+Your account registration has been successfully received.
+
+Registered email:
+${recipientEmail}
+
+${verificationUrl ? `Please verify your email address to activate your account: ${verificationUrl}` : `Sign in to your account at: ${clientUrl}/login`}
+
+Best regards,
+Egyptian Space Agency Space Academy`;
+
   return sendEmail({
-    to,
-    subject: 'EGSA Space Academy — Registration Received | تم استلام تسجيلك بنجاح',
+    to: recipientEmail,
+    subject: verificationUrl
+      ? 'EGSA Space Academy — Confirm Registration & Verify Email | تأكيد التسجيل'
+      : 'Registration Confirmation - Egyptian Space Agency Space Academy',
     html,
-    text: `Dear ${fullName}, your registration for EGSA Space Academy was received (Reference: ${registrationNumber}). Login to explore programs: ${clientUrl}/login`,
+    text,
   });
 }
 
@@ -541,6 +679,9 @@ async function sendCertificateReadyEmail({ to, fullName, courseTitle, recipientN
 }
 
 module.exports = {
+  isSmtpConfigured,
+  buildTransport,
+  verifySmtpConnection,
   sendEmail,
   sendVerificationEmail,
   sendPasswordResetEmail,

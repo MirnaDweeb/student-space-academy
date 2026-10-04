@@ -22,6 +22,8 @@ const PaymentTransactionSchema = new mongoose.Schema(
     },
     failureReason: { type: String },
     paymentDate: { type: Date },
+    stripeCheckoutSessionId: { type: String, sparse: true, index: true },
+    stripePaymentIntentId: { type: String, sparse: true, index: true },
     metadata: { type: mongoose.Schema.Types.Mixed },
     refundAmount: { type: Number, default: 0 },
     refundedAt: { type: Date },

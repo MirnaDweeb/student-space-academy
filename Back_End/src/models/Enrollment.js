@@ -20,4 +20,8 @@ const EnrollmentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+EnrollmentSchema.index({ student: 1, cohort: 1 }, { unique: true, sparse: true });
+EnrollmentSchema.index({ student: 1, course: 1 });
+EnrollmentSchema.index({ cohort: 1, status: 1 });
+
 module.exports = mongoose.model('Enrollment', EnrollmentSchema);

@@ -24,6 +24,7 @@ export default function UploadMediaModal({ isOpen, onClose, onSuccess, onUploadS
   const [title, setTitle] = useState('');
   const [caption, setCaption] = useState('');
   const [description, setDescription] = useState('');
+  const [category, setCategory] = useState('Project');
   const [consentConfirmed, setConsentConfirmed] = useState(false);
 
   // States
@@ -125,8 +126,8 @@ export default function UploadMediaModal({ isOpen, onClose, onSuccess, onUploadS
       setError('Please select an image file to upload.');
       return;
     }
-    if (!selectedEnrollmentId || !selectedSessionId) {
-      setError('Please select the corresponding course and training session.');
+    if (!selectedEnrollmentId) {
+      setError('Please select an enrolled course.');
       return;
     }
     if (!title.trim()) {
@@ -146,7 +147,10 @@ export default function UploadMediaModal({ isOpen, onClose, onSuccess, onUploadS
       formData.append('file', file);
       formData.append('courseId', currentEnrollment.course?._id || currentEnrollment.course);
       formData.append('cohortId', currentEnrollment.cohort?._id || currentEnrollment.cohort);
-      formData.append('sessionId', selectedSessionId);
+      if (selectedSessionId) {
+        formData.append('sessionId', selectedSessionId);
+      }
+      formData.append('category', category || 'Project');
       formData.append('title', title.trim());
       formData.append('caption', caption.trim());
       formData.append('description', description.trim());
@@ -252,16 +256,31 @@ export default function UploadMediaModal({ isOpen, onClose, onSuccess, onUploadS
                     </div>
 
                     <div className="mb-3">
+                      <label className="form-label small fw-semibold text-dark">Media Category:</label>
+                      <select
+                        className="form-select form-select-sm"
+                        value={category}
+                        onChange={(e) => setCategory(e.target.value)}
+                      >
+                        <option value="Project">Project / Capstone Documentation</option>
+                        <option value="Activity">Workshop / Practical Activity</option>
+                        <option value="Student Photo">Student in Action / Laboratory Portrait</option>
+                        <option value="Workshop">Technical Drill / Cleanroom Work</option>
+                        <option value="Other">Other Institutional Media</option>
+                      </select>
+                    </div>
+
+                    <div className="mb-3">
                       <label className="form-label small fw-semibold text-dark">
-                        Select Training Session: {sessionsLoading && <span className="spinner-border spinner-border-sm ms-2" />}
+                        Training Session (Optional): {sessionsLoading && <span className="spinner-border spinner-border-sm ms-2" />}
                       </label>
                       <select
                         className="form-select form-select-sm"
                         value={selectedSessionId}
                         onChange={(e) => setSelectedSessionId(e.target.value)}
-                        disabled={sessionsLoading || sessions.length === 0}
+                        disabled={sessionsLoading}
                       >
-                        {sessions.length === 0 && <option value="">No scheduled sessions found for this cohort</option>}
+                        <option value="">General Course Project / Activity (No specific session)</option>
                         {sessions.map((sess) => (
                           <option key={sess._id} value={sess._id}>
                             Session #{sess.sessionNumber}: {sess.title} ({new Date(sess.date).toLocaleDateString()})
@@ -484,8 +503,8 @@ export default function UploadMediaModal({ isOpen, onClose, onSuccess, onUploadS
                   type="button"
                   className="btn btn-primary btn-sm px-3 fw-semibold"
                   onClick={() => {
-                    if (step === 1 && !selectedSessionId) {
-                      setError('Please select a valid training session.');
+                    if (step === 1 && !selectedEnrollmentId) {
+                      setError('Please select an enrolled course.');
                       return;
                     }
                     if (step === 2 && !file) {

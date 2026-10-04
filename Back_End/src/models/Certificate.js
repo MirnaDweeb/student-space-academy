@@ -29,6 +29,13 @@ const CertificateSchema = new mongoose.Schema(
       ],
       default: 'NAME_SUBMITTED',
     },
+    feedbackCompleted: { type: Boolean, default: false },
+    courseFeedbackCompleted: { type: Boolean, default: false },
+    agencyFeedbackCompleted: { type: Boolean, default: false },
+    feedbackDeadline: { type: Date },
+    adminCreated: { type: Boolean, default: false },
+    createdByAdmin: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    adminCreatedAt: { type: Date },
     verificationToken: { type: String, unique: true, sparse: true },
     nameConfirmedAt: { type: Date, default: Date.now },
     nameConfirmedBy: {
@@ -58,6 +65,8 @@ const CertificateSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+CertificateSchema.index({ student: 1, course: 1 }, { unique: true });
 
 CertificateSchema.pre('validate', function (next) {
   if (this.certificateName && !this.recipientName) {

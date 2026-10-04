@@ -72,10 +72,16 @@ async function submitName(req, res, next) {
       nameToSubmit
     );
 
+    const feedbackRequired = !cert.feedbackCompleted;
+    const message = feedbackRequired
+      ? 'Your certificate request has been submitted successfully. Your request has been sent to the Academy Administration for review. Please complete the required course feedback to continue the certificate process. You will be notified when your certificate is ready.'
+      : 'Your certificate request has been submitted successfully. Your request has been sent to the Academy Administration for review. You will be notified when your certificate is ready.';
+
     res.status(201).json({
       success: true,
-      message: 'Certificate name submitted successfully. Waiting for Academy administration preparation.',
+      message,
       data: cert,
+      feedbackRequired,
     });
   } catch (err) {
     next(err);
@@ -251,10 +257,30 @@ async function verifyCertificate(req, res, next) {
 
 /**
  * Download certificate file safely.
+/**
+ * Admin: Create certificate record for student.
+ * POST /api/admin/certificates/:id/create
+ */
+async function adminCreate(req, res, next) {
+  try {
+    const cert = await certificateService.adminCreateCertificate(req.params.id, req.user);
+    res.json({
+      success: true,
+      message: 'Certificate created successfully by administration.',
+      data: cert,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Download certificate file safely.
  * GET /api/certificates/:id/download
  */
 async function downloadCertificate(req, res, next) {
   try {
+    const Evaluation = require('../models/Evaluation');
     const cert = await Certificate.findById(req.params.id).populate('student course');
     if (!cert) {
       throw new AppError('Certificate not found.', 404);
@@ -265,6 +291,39 @@ async function downloadCertificate(req, res, next) {
     const isAdmin = req.user && ['admin', 'superadmin'].includes(req.user.role);
     if (!isOwner && !isAdmin) {
       throw new AppError('Forbidden: you do not have permission to download this certificate.', 403);
+    }
+
+    // If student is downloading, enforce mandatory feedback and deadline checks
+    if (!isAdmin) {
+      const evalDoc = await Evaluation.findOne({
+        student: cert.student._id,
+        $or: [
+          { enrollment: cert.enrollment?._id || cert.enrollment },
+          { course: cert.course?._id || cert.course },
+        ],
+      });
+
+      const isCourseDone = Boolean(evalDoc?.courseFeedbackCompleted || evalDoc?.ratings?.content);
+      const isAgencyDone = Boolean(evalDoc?.agencyFeedbackCompleted);
+      const isFeedbackDone = isCourseDone && isAgencyDone;
+
+      if (cert.feedbackDeadline && new Date() > new Date(cert.feedbackDeadline) && !isFeedbackDone) {
+        throw new AppError(
+          'Feedback deadline has passed without required completion. Your certificate cannot be issued or delivered at this time. Please contact Academic Affairs.',
+          403
+        );
+      }
+
+      if (!isCourseDone || !isAgencyDone) {
+        throw new AppError(
+          'Cannot download certificate: You must complete both Course Feedback and Egyptian Space Agency Feedback before your certificate can be released.',
+          403
+        );
+      }
+
+      if (String(cert.status).toUpperCase() !== 'ISSUED') {
+        throw new AppError('Official certificate has not been released by administration yet.', 403);
+      }
     }
 
     if (!cert.fileUrl) {
@@ -291,6 +350,7 @@ module.exports = {
   getCertificateById,
   adminList,
   adminGet,
+  adminCreate,
   adminUpload,
   adminIssue,
   adminStatus,

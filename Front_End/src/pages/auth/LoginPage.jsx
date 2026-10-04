@@ -2,9 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { Link, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext.jsx';
 import { authTranslations } from '../../utils/authTranslations.js';
+import BrandLogo from '../../components/BrandLogo.jsx';
 
 export default function LoginPage() {
-  const { login, resendVerification, language = 'en', toggleLanguage = () => {} } = useAuth();
+  const { login, language = 'en', toggleLanguage = () => {} } = useAuth();
   const t = authTranslations[language] || authTranslations.en;
   const navigate = useNavigate();
   const location = useLocation();
@@ -13,17 +14,21 @@ export default function LoginPage() {
   const [email, setEmail] = useState('sara.demo@egsa-academy.example');
   const [password, setPassword] = useState('Password123!');
   const [showPassword, setShowPassword] = useState(false);
+  const [successMsg, setSuccessMsg] = useState(location.state?.message || '');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // Unverified account state
-  const [isUnverified, setIsUnverified] = useState(false);
-  const [unverifiedEmail, setUnverifiedEmail] = useState('');
-  const [resendCooldown, setResendCooldown] = useState(0);
-  const [resendMsg, setResendMsg] = useState('');
-  const [resendLoading, setResendLoading] = useState(false);
+  // Sync registration success state or URL flags
+  useEffect(() => {
+    if (location.state?.message) {
+      setSuccessMsg(location.state.message);
+    }
+    if (location.state?.email) {
+      setEmail(location.state.email);
+      setPassword('');
+    }
+  }, [location.state]);
 
-  // Handle URL query flags (e.g. ?session_expired=1 or ?unverified=1)
   useEffect(() => {
     if (searchParams.get('session_expired') === '1') {
       setError(
@@ -31,15 +36,13 @@ export default function LoginPage() {
           ? 'انتهت صلاحية جلستك. يرجى تسجيل الدخول مجدداً للمتابعة.'
           : 'Your security session has expired. Please sign in again to continue.'
       );
-    } else if (searchParams.get('unverified') === '1') {
-      setIsUnverified(true);
     }
   }, [searchParams, language]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
-    setIsUnverified(false);
+    setSuccessMsg('');
     setLoading(true);
 
     try {
@@ -60,46 +63,18 @@ export default function LoginPage() {
       navigate(destination, { replace: true });
     } catch (err) {
       const responseData = err.response?.data;
-      if (responseData?.code === 'EMAIL_NOT_VERIFIED') {
-        setIsUnverified(true);
-        setUnverifiedEmail(responseData?.data?.email || email);
-      } else {
-        setError(
-          responseData?.message ||
-            (language === 'ar'
-              ? 'البريد الإلكتروني أو كلمة المرور غير صحيحة.'
-              : 'The email or password is incorrect.')
-        );
-      }
+      setError(
+        responseData?.message ||
+          (language === 'ar'
+            ? 'البريد الإلكتروني أو كلمة المرور غير صحيحة.'
+            : 'The email or password is incorrect.')
+      );
     } finally {
       setLoading(false);
     }
   };
 
-  const handleResend = async () => {
-    if (resendCooldown > 0 || resendLoading) return;
-    setResendLoading(true);
-    setResendMsg('');
-    try {
-      const targetEmail = unverifiedEmail.includes('***') ? email : unverifiedEmail;
-      const res = await resendVerification(targetEmail);
-      setResendMsg(res?.message || t.resendSuccess);
-      setResendCooldown(60);
-      const timer = setInterval(() => {
-        setResendCooldown((prev) => {
-          if (prev <= 1) {
-            clearInterval(timer);
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    } catch (err) {
-      setResendMsg(err.response?.data?.message || (language === 'ar' ? 'فشل إعادة الإرسال.' : 'Failed to resend link.'));
-    } finally {
-      setResendLoading(false);
-    }
-  };
+
 
   return (
     <div className="auth-container-wrapper">
@@ -108,7 +83,7 @@ export default function LoginPage() {
           {/* Header Bar */}
           <div className="d-flex justify-content-between align-items-center mb-4">
             <div className="d-flex align-items-center gap-2">
-              <i className="fa-solid fa-satellite-dish text-primary-egsa fa-lg"></i>
+              <BrandLogo height={28} className="me-1" />
               <span className="fw-bold text-dark small">{t.portalName}</span>
             </div>
             <button
@@ -148,42 +123,11 @@ export default function LoginPage() {
             </div>
           )}
 
-          {/* Unverified Email Dedicated Alert */}
-          {isUnverified && (
-            <div className="mission-gate-alert urgent mb-4">
-              <div className="d-flex align-items-start gap-2">
-                <i className="fa-solid fa-envelope-circle-check text-warning-egsa fa-lg mt-1"></i>
-                <div className="flex-grow-1">
-                  <h6 className="fw-bold mb-1 text-dark">{t.unverifiedNoticeTitle}</h6>
-                  <p className="small text-muted mb-2">{t.unverifiedNoticeMsg}</p>
-                  {resendMsg && (
-                    <div className="alert alert-info py-1 px-2 small mb-2">
-                      <i className="fa-solid fa-circle-info me-1"></i>
-                      {resendMsg}
-                    </div>
-                  )}
-                  <button
-                    type="button"
-                    className="btn btn-outline-warning btn-sm fw-semibold"
-                    onClick={handleResend}
-                    disabled={resendCooldown > 0 || resendLoading}
-                  >
-                    {resendLoading ? (
-                      <>
-                        <span className="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
-                        {t.resending}
-                      </>
-                    ) : resendCooldown > 0 ? (
-                      `${t.resendVerificationBtn} (${resendCooldown}s)`
-                    ) : (
-                      <>
-                        <i className="fa-solid fa-paper-plane me-1"></i>
-                        {t.resendVerificationBtn}
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
+          {/* Success Alert */}
+          {successMsg && (
+            <div className="alert alert-success py-2 d-flex align-items-center gap-2 small mb-4" role="alert">
+              <i className="fa-solid fa-circle-check text-success flex-shrink-0"></i>
+              <div>{successMsg}</div>
             </div>
           )}
 

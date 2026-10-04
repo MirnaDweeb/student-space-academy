@@ -68,12 +68,7 @@ async function register(req, res, next) {
       throw new AppError('An account with this email address or National ID already exists.', 409);
     }
 
-    // Cryptographically secure verification token
-    const rawVerificationToken = generateRandomToken(32);
-    const verificationHash = hashToken(rawVerificationToken);
-    const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-
-    // Create User (STRICT SECURITY RULE: Public registration creates STUDENT only)
+    // Create User (STRICT SECURITY RULE: Public registration creates STUDENT with active status)
     const user = await User.create({
       fullName: fullName.trim(),
       email: normalizedEmail,
@@ -81,12 +76,9 @@ async function register(req, res, next) {
       phone: phone.trim(),
       nationalId: normalizedNationalId,
       role: 'student', // Enforce student role server-side
-      accountStatus: 'unverified',
-      isEmailVerified: false,
-      emailVerificationTokenHash: verificationHash,
-      emailVerificationToken: rawVerificationToken, // Backward compatibility
-      emailVerificationExpires: verificationExpires,
-      isActive: false,
+      accountStatus: 'active',
+      isEmailVerified: true,
+      isActive: true,
     });
 
     // Create associated StudentProfile with academic information
@@ -100,53 +92,42 @@ async function register(req, res, next) {
       profileCompleted: false,
     });
 
-    // 1. Send institutional verification email (Email 1)
-    const clientUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:5173';
-    const verificationUrl = `${clientUrl}/verify-email?token=${rawVerificationToken}`;
-
-    try {
-      await sendVerificationEmail({
-        to: user.email,
-        fullName: user.fullName,
-        verificationUrl,
-      });
-    } catch (emailErr) {
-      console.error('[EMAIL ERROR] Failed to send verification email:', emailErr.message);
-    }
-
-    // 2. Send institutional registration confirmation email (Email 2)
+    // Send official institutional registration confirmation email (welcome email, non-blocking)
     try {
       await sendRegistrationConfirmationEmail({
         to: user.email,
         fullName: user.fullName,
-        registrationNumber: user.registrationNumber,
         email: user.email,
-        preferredLanguage: user.preferredLanguage || 'en',
+        registrationNumber: user.registrationNumber,
       });
+      console.log('[auth] Registration successful');
+      console.log(`[mail] Registration confirmation sent to ${user.email}`);
     } catch (emailErr) {
-      console.error('[EMAIL ERROR] Failed to send registration confirmation email:', emailErr.message);
+      console.log('[auth] Registration successful');
+      console.log('[mail] Registration confirmation email note:', emailErr.message);
     }
 
-    // 3. Create initial in-app registration notification
+    // Create in-app registration notification
     try {
       await notify({
         recipient: user._id,
         title: 'Registration Received',
-        message: `Welcome to EGSA Space Academy! Your registration reference is ${user.registrationNumber || 'EGSA-CADET'}. Please verify your email to apply for space courses.`,
+        message: `Welcome to EGSA Space Academy! Your registration reference is ${user.registrationNumber || 'EGSA-CADET'}. Please log in using your registered email and password.`,
         type: 'info',
       });
     } catch (notifErr) {
       console.error('[NOTIF ERROR] Failed to create registration notification:', notifErr.message);
     }
 
-    // Notice: Do NOT issue tokens or automatically log in. User must verify email first.
     res.status(201).json({
       success: true,
-      message: 'Registration successful. A verification link has been sent to your email. Please verify your email before signing in.',
+      message: 'Registration successful. Please log in using your registered email and password.',
       data: {
-        email: maskEmail(user.email),
+        email: user.email,
+        fullName: user.fullName,
         registrationNumber: user.registrationNumber,
-        unverified: true,
+        accountStatus: user.accountStatus,
+        isEmailVerified: user.isEmailVerified,
       },
     });
   } catch (err) {
@@ -159,7 +140,7 @@ async function register(req, res, next) {
  */
 async function verifyEmail(req, res, next) {
   try {
-    const rawToken = req.params?.token || req.body?.token;
+    const rawToken = req.query?.token || req.params?.token || req.body?.token;
     if (!rawToken || !String(rawToken).trim()) {
       throw new AppError('Verification token is required.', 400);
     }
@@ -244,15 +225,56 @@ async function resendVerification(req, res, next) {
     const clientUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:5173';
     const verificationUrl = `${clientUrl}/verify-email?token=${rawVerificationToken}`;
 
-    await sendVerificationEmail({
-      to: user.email,
-      fullName: user.fullName,
-      verificationUrl,
-    });
+    let emailResult = null;
+    let emailErrMessage = '';
 
-    res.json({
-      success: true,
-      message: 'A fresh verification link has been dispatched to your email address.',
+    try {
+      emailResult = await sendVerificationEmail({
+        to: user.email,
+        fullName: user.fullName,
+        verificationUrl,
+      });
+    } catch (err) {
+      emailErrMessage = err.message;
+    }
+
+    const isDev = process.env.NODE_ENV !== 'production';
+
+    if (emailResult && (emailResult.success || emailResult.simulated)) {
+      if (emailResult.messageId) {
+        console.log(`[mail] Verification email accepted, id: ${emailResult.messageId}`);
+      }
+      return res.json({
+        success: true,
+        emailSent: Boolean(emailResult.success),
+        message: 'A fresh verification link has been dispatched to your email address.',
+        data: {
+          devVerificationUrl: isDev ? verificationUrl : undefined,
+        },
+      });
+    }
+
+    // If SMTP failed or is unconfigured
+    const reason = emailResult?.reason || emailErrMessage || 'SMTP delivery unconfirmed or placeholder configuration in .env';
+    console.log('[mail] Verification resend failed');
+    console.log(`[mail] Reason: ${reason}`);
+
+    if (isDev) {
+      return res.status(200).json({
+        success: true,
+        emailSent: false,
+        message: 'Notice: SMTP is running with placeholder configuration in .env. In development mode, use the provided link to verify.',
+        data: {
+          devVerificationUrl: verificationUrl,
+          unverified: true,
+        },
+      });
+    }
+
+    return res.status(503).json({
+      success: false,
+      emailSent: false,
+      message: 'Unable to dispatch verification email because SMTP mail services are currently unconfigured or unavailable. Please contact EGSA administration.',
     });
   } catch (err) {
     next(err);
@@ -278,24 +300,16 @@ async function login(req, res, next) {
     }
 
     // Check account status: Suspended or Disabled
-    if (user.accountStatus === 'suspended' || user.accountStatus === 'disabled' || !user.isActive) {
-      // If user is unverified and isActive is false, handle verification check first
-      if (user.accountStatus !== 'unverified' && user.isEmailVerified) {
-        throw new AppError('Account is deactivated or suspended. Please contact EGSA administration.', 403);
-      }
+    if (user.accountStatus === 'suspended' || user.accountStatus === 'disabled') {
+      throw new AppError('Account is deactivated or suspended. Please contact EGSA administration.', 403);
     }
 
-    // Enforce email verification before student portal access
-    if (!user.isEmailVerified || user.accountStatus === 'unverified') {
-      return res.status(403).json({
-        success: false,
-        code: 'EMAIL_NOT_VERIFIED',
-        message: 'Your email address has not been verified yet. Please verify your email before signing in.',
-        data: {
-          email: maskEmail(user.email),
-          unverified: true,
-        },
-      });
+    // Seamlessly ensure active status if user had an unverified legacy status
+    if (user.accountStatus === 'unverified' || !user.isEmailVerified || !user.isActive) {
+      user.isEmailVerified = true;
+      user.accountStatus = 'active';
+      user.isActive = true;
+      await user.save();
     }
 
     // Issue tokens

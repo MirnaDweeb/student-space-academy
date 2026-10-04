@@ -213,7 +213,7 @@ export default function AssessmentsPage() {
                           <i className="fa-solid fa-square-poll-vertical me-1"></i> {isAr ? 'عرض النتيجة' : 'View Result'}
                         </Link>
                       ) : (
-                        <Link to="/student/readiness/start" state={{ courseId: app.course?._id }} className="btn btn-sm btn-primary">
+                        <Link to={`/student/readiness/start?courseId=${app.course?._id || app.course}`} state={{ courseId: app.course?._id || app.course }} className="btn btn-sm btn-primary">
                           <i className="fa-solid fa-play me-1"></i> {isAr ? 'بدء التقييم' : 'Start Diagnostic'}
                         </Link>
                       )}

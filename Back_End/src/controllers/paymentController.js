@@ -1,6 +1,7 @@
 const Invoice = require('../models/Invoice');
 const PaymentTransaction = require('../models/PaymentTransaction');
 const Course = require('../models/Course');
+const Application = require('../models/Application');
 const paymentService = require('../services/paymentService');
 const { AppError } = require('../middleware/error');
 
@@ -10,6 +11,7 @@ const { AppError } = require('../middleware/error');
  */
 async function myPayments(req, res, next) {
   try {
+    await paymentService.processExpiredInvoices();
     const invoices = await Invoice.find({ student: req.user._id })
       .populate('course', 'title startDate price transportationPrice currency level')
       .populate('cohort', 'name startDate endDate')
@@ -80,14 +82,21 @@ async function getInvoiceDetails(req, res, next) {
  */
 async function calculatePrice(req, res, next) {
   try {
-    const { courseId, packageType } = req.body;
-    if (!courseId) {
-      throw new AppError('courseId is required.', 400);
+    const courseId = req.body?.courseId || req.query?.courseId;
+    const cohortId = req.body?.cohortId || req.query?.cohortId;
+    const packageType = req.body?.packageType || req.query?.packageType || 'WITHOUT_TRANSPORTATION';
+
+    let course = null;
+    if (courseId) {
+      course = await Course.findById(courseId);
+    } else if (cohortId) {
+      const Cohort = require('../models/Cohort');
+      const cohort = await Cohort.findById(cohortId).populate('course');
+      course = cohort?.course;
     }
 
-    const course = await Course.findById(courseId);
     if (!course) {
-      throw new AppError('Course not found.', 404);
+      throw new AppError('Valid courseId or cohortId is required.', 400);
     }
 
     const pricing = paymentService.calculatePricing(course, packageType);
@@ -135,9 +144,25 @@ async function prepareInvoice(req, res, next) {
  */
 async function initiatePayment(req, res, next) {
   try {
-    const invoiceId = req.params.invoiceId || req.body.invoiceId;
+    let invoiceId = req.params.invoiceId || req.body.invoiceId;
+    const applicationId = req.body.applicationId;
+
+    if (!invoiceId && applicationId) {
+      const inv = await Invoice.findOne({ application: applicationId });
+      if (inv) {
+        invoiceId = inv._id;
+      } else {
+        const prepared = await paymentService.getOrCreateInvoiceForApplication({
+          applicationId,
+          studentId: req.user._id,
+          packageType: req.body.packageType,
+        });
+        invoiceId = prepared?.invoice?._id;
+      }
+    }
+
     if (!invoiceId) {
-      throw new AppError('invoiceId is required.', 400);
+      throw new AppError('invoiceId or applicationId is required.', 400);
     }
 
     const { packageType, method, returnUrl } = req.body;
@@ -153,7 +178,10 @@ async function initiatePayment(req, res, next) {
     res.status(201).json({
       success: true,
       message: 'Payment session initiated with gateway provider.',
-      data: result,
+      data: {
+        ...result,
+        redirectUrl: result.paymentUrl || result.redirectUrl,
+      },
     });
   } catch (err) {
     next(err);
@@ -198,10 +226,39 @@ async function verifyPayment(req, res, next) {
  */
 async function payInvoice(req, res, next) {
   try {
-    const invoice = await Invoice.findOne({ _id: req.params.invoiceId, student: req.user._id });
+    const isPrivileged = req.user && ['admin', 'superadmin'].includes(req.user.role);
+    const isDevOrTest = process.env.NODE_ENV !== 'production' || process.env.ALLOW_MOCK_PAYMENTS === 'true';
+
+    if (!isDevOrTest && !isPrivileged) {
+      throw new AppError('Direct payment confirmation is disabled in production. Payments must be processed through gateway verification.', 403);
+    }
+
+    const query = { _id: req.params.invoiceId };
+    if (!isPrivileged) {
+      query.student = req.user._id;
+    }
+
+    const invoice = await Invoice.findOne(query);
     if (!invoice) throw new AppError('Invoice not found.', 404);
-    if (invoice.status === 'Paid' || invoice.status === 'PAID') {
-      throw new AppError('Invoice already paid.', 400);
+
+    if (invoice.application) {
+      const application = await Application.findById(invoice.application);
+      if (application && !['Accepted', 'Eligible - Payment Pending'].includes(application.status)) {
+        throw new AppError(`Payment not permitted: application status is ${application.status}. Applications must be accepted before payment.`, 400);
+      }
+    }
+
+    if (['Paid', 'PAID'].includes(invoice.status)) {
+      throw new AppError('Invoice has already been paid and settled.', 400);
+    }
+
+    if (['Cancelled', 'Overdue', 'Expired', 'Waived'].includes(invoice.status)) {
+      throw new AppError(`Cannot pay an invoice that is ${invoice.status.toLowerCase()}. Please reapply or request a new invoice.`, 400);
+    }
+
+    if (invoice.dueDate && new Date() > new Date(invoice.dueDate) && invoice.amount > 0) {
+      await paymentService.handleExpiredReservation(invoice);
+      throw new AppError('The 72-hour payment deadline for this reservation has expired. Your seat has been released.', 400);
     }
 
     const { method, packageType } = req.body;
@@ -249,6 +306,152 @@ async function adminGet(req, res, next) {
   }
 }
 
+/**
+ * Stripe Webhook Handler
+ * POST /api/payments/webhook
+ * Verifies cryptographic Stripe signature and idempotently confirms transaction.
+ */
+async function handleStripeWebhook(req, res, next) {
+  const sig = req.headers['stripe-signature'];
+  if (!sig) {
+    return res.status(400).json({ error: 'Missing stripe-signature header.' });
+  }
+
+  const { getPaymentProvider } = require('../services/paymentProviders');
+  const stripeProvider = getPaymentProvider('STRIPE');
+
+  let event;
+  try {
+    event = stripeProvider.constructWebhookEvent(req.rawBody, sig);
+  } catch (err) {
+    console.error('[STRIPE WEBHOOK ERROR] Signature verification failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  try {
+    switch (event.type) {
+      case 'checkout.session.completed': {
+        const session = event.data.object;
+        let transactionId = session.metadata?.transactionId;
+
+        if (!transactionId) {
+          const tx = await PaymentTransaction.findOne({ stripeCheckoutSessionId: session.id });
+          if (tx) transactionId = tx.transactionId;
+        }
+
+        if (transactionId) {
+          await paymentService.verifyAndFinalizePayment({
+            transactionId,
+            providerPayload: { session, sessionId: session.id },
+            providerReference: typeof session.payment_intent === 'string'
+              ? session.payment_intent
+              : session.id,
+          });
+        }
+        break;
+      }
+
+      case 'payment_intent.payment_failed': {
+        const intent = event.data.object;
+        const tx = await PaymentTransaction.findOne({
+          $or: [
+            { stripePaymentIntentId: intent.id },
+            { 'metadata.sessionToken': intent.id },
+          ],
+        });
+        if (tx && tx.status !== 'Paid') {
+          tx.status = 'Failed';
+          tx.failureReason = intent.last_payment_error?.message || 'Payment card declined.';
+          await tx.save();
+        }
+        break;
+      }
+
+      default:
+        // Acknowledge other event types
+        break;
+    }
+
+    res.json({ received: true, type: event.type });
+  } catch (err) {
+    console.error('[STRIPE WEBHOOK HANDLER ERROR]:', err);
+    res.status(500).json({ error: 'Webhook processing error', details: err.message });
+  }
+}
+
+/**
+ * Checks status of a payment session (for redirect return landing page).
+ * GET /api/payments/session-status/:sessionId
+ */
+async function getPaymentSessionStatus(req, res, next) {
+  try {
+    const { sessionId } = req.params;
+    if (!sessionId) {
+      throw new AppError('sessionId parameter is required.', 400);
+    }
+
+    const transaction = await PaymentTransaction.findOne({
+      $or: [
+        { stripeCheckoutSessionId: sessionId },
+        { transactionId: sessionId },
+        { providerReference: sessionId },
+        { 'metadata.sessionToken': sessionId },
+      ],
+    })
+      .populate('invoice')
+      .populate('student', 'fullName email');
+
+    if (!transaction) {
+      throw new AppError('Payment transaction not found for this session.', 404);
+    }
+
+    const isOwner = req.user && String(transaction.student?._id || transaction.student) === String(req.user._id);
+    const isAdmin = req.user && ['admin', 'superadmin'].includes(req.user.role);
+    if (!isOwner && !isAdmin) {
+      throw new AppError('Forbidden: you cannot access another user payment session.', 403);
+    }
+
+    // If transaction is still initiated/pending, and provider is Stripe, attempt live verification
+    if (transaction.status !== 'Paid' && transaction.provider === 'STRIPE') {
+      try {
+        const { getPaymentProvider } = require('../services/paymentProviders');
+        const stripeProvider = getPaymentProvider('STRIPE');
+        const verifyRes = await stripeProvider.verifyPayment({
+          transactionId: transaction.transactionId,
+          payload: { sessionId },
+        });
+        if (verifyRes.isVerified && verifyRes.status === 'SUCCESS') {
+          await paymentService.verifyAndFinalizePayment({
+            transactionId: transaction.transactionId,
+            providerPayload: { sessionId },
+            providerReference: verifyRes.providerReference,
+          });
+          const refreshed = await PaymentTransaction.findById(transaction._id).populate('invoice');
+          return res.json({
+            success: true,
+            status: refreshed.status,
+            isSettled: refreshed.status === 'Paid',
+            transaction: refreshed,
+            invoice: refreshed.invoice,
+          });
+        }
+      } catch (_) {
+        // Fall back to returning current database state
+      }
+    }
+
+    res.json({
+      success: true,
+      status: transaction.status,
+      isSettled: transaction.status === 'Paid',
+      transaction,
+      invoice: transaction.invoice,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   myPayments,
   getInvoiceDetails,
@@ -259,4 +462,6 @@ module.exports = {
   payInvoice,
   adminList,
   adminGet,
+  handleStripeWebhook,
+  getPaymentSessionStatus,
 };

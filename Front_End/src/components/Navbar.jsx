@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
+import BrandLogo from './BrandLogo.jsx';
 
 export default function Navbar() {
   const { isAuthenticated, user, logout, language = 'en', toggleLanguage = () => {} } = useAuth();
@@ -15,7 +16,7 @@ export default function Navbar() {
     <nav className="navbar navbar-expand-lg egsa-navbar sticky-top">
       <div className="container">
         <Link className="navbar-brand brand d-flex align-items-center" to="/">
-          <i className="fa-solid fa-satellite-dish me-2 text-primary-egsa"></i>
+          <BrandLogo height={32} className="me-2" />
           <span>EGSA Space Academy</span>
         </Link>
         <button

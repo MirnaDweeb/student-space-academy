@@ -167,9 +167,9 @@ export default function StudentSidebar({
           {!isCollapsed && (
             <div className="sidebar-user-info">
               <div className="sidebar-user-name" title={user?.fullName}>
-                {user?.fullName || 'Cadet Student'}
+                {user?.fullName || 'Academy Student'}
               </div>
-              <div className="sidebar-user-role">Space Academy Cadet</div>
+              <div className="sidebar-user-role">Space Academy Student</div>
             </div>
           )}
         </div>

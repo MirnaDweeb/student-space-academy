@@ -21,12 +21,14 @@ router.post('/register', authLimiter, validate(registerValidator), ctrl.register
 router.post('/login', authLimiter, validate(loginValidator), ctrl.login);
 router.post('/resend-verification', resendVerificationLimiter, validate(resendVerificationValidator), ctrl.resendVerification);
 
-// Email Verification (Supports both POST body and GET url token params)
+// Email Verification (Supports POST body, GET query token, and GET /verify/:token)
 router.post('/verify-email', validate(verifyEmailValidator), ctrl.verifyEmail);
+router.get('/verify-email', validate(verifyEmailValidator), ctrl.verifyEmail);
 router.get('/verify/:token', validate(verifyEmailValidator), ctrl.verifyEmail);
 
 // Session Refresh & Termination
 router.post('/refresh', ctrl.refreshToken);
+router.post('/refresh-token', ctrl.refreshToken);
 router.post('/logout', ctrl.logout);
 
 // Password Recovery

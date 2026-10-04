@@ -3,6 +3,7 @@ const Certificate = require('../models/Certificate');
 const Enrollment = require('../models/Enrollment');
 const Assessment = require('../models/Assessment');
 const AssessmentResult = require('../models/AssessmentResult');
+const Evaluation = require('../models/Evaluation');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
 const attendanceService = require('./attendanceService');
@@ -72,20 +73,24 @@ async function checkCertificateEligibility(studentId, enrollmentId) {
   if (!validStatuses.includes(enrollment.status)) {
     return {
       isEligible: false,
+      isEligibleToRequest: false,
+      isEligibleForIssuance: false,
       reasons: [`Enrollment status is ${enrollment.status}. Active, confirmed, or completed enrollment required.`],
+      academicReasons: [`Enrollment status is ${enrollment.status}. Active, confirmed, or completed enrollment required.`],
+      evaluationReasons: [],
       enrollment,
     };
   }
 
-  const reasons = [];
+  const academicReasons = [];
 
   // 1. Attendance check
   try {
     const attSummary = await attendanceService.getAttendanceSummary(studentId, enrollment._id);
     if (attSummary.warningState === 'CERTIFICATE_INELIGIBLE' || attSummary.certificateEligibility === 'INELIGIBLE' || attSummary.certificateEligibility === 'FAILED') {
-      reasons.push('Absence rate exceeds permitted attendance threshold.');
+      academicReasons.push('Absence rate exceeds permitted attendance threshold.');
     } else if (attSummary.completedSessions > 0 && attSummary.attendanceRate < (attSummary.policy?.minimumAttendancePercentage || 85)) {
-      reasons.push(`Attendance rate (${attSummary.attendanceRate}%) is below the required ${attSummary.policy?.minimumAttendancePercentage || 85}%.`);
+      academicReasons.push(`Attendance rate (${attSummary.attendanceRate}%) is below the required ${attSummary.policy?.minimumAttendancePercentage || 85}%.`);
     }
   } catch (err) {
     // If attendance summary throws due to no sessions, continue gracefully
@@ -108,18 +113,48 @@ async function checkCertificateEligibility(studentId, enrollmentId) {
       for (const assess of mandatoryAssessments) {
         const res = results.find((r) => r.assessment.toString() === assess._id.toString());
         if (!res || res.score == null) {
-          reasons.push(`Mandatory assessment "${assess.title}" has not been completed or evaluated yet.`);
+          academicReasons.push(`Mandatory assessment "${assess.title}" has not been completed or evaluated yet.`);
         } else if (res.score < assess.passingScore) {
-          reasons.push(`Mandatory assessment "${assess.title}" score (${res.score}%) is below the passing mark (${assess.passingScore}%).`);
+          academicReasons.push(`Mandatory assessment "${assess.title}" score (${res.score}%) is below the passing mark (${assess.passingScore}%).`);
         }
       }
     }
   }
 
+  // 3. Official Course & Instructor Evaluation Survey Check (Gate 4)
+  const courseId = enrollment.course?._id || enrollment.course;
+  const evaluationExists = await Evaluation.exists({
+    student: studentId,
+    $or: [
+      { enrollment: enrollment._id },
+      { course: courseId },
+    ],
+  });
+
+  const evaluationReasons = [];
+  if (!evaluationExists) {
+    evaluationReasons.push('Official course and instructor evaluation survey has not been submitted yet.');
+  }
+
+  const allReasons = [...academicReasons, ...evaluationReasons];
+  const academicRequirementsMet = validStatuses.includes(enrollment.status) && academicReasons.length === 0;
+  const isEligibleToRequest = academicRequirementsMet;
+  const isEligibleForIssuance = academicRequirementsMet && Boolean(evaluationExists);
+
   return {
-    isEligible: reasons.length === 0,
-    reasons,
+    isEligible: isEligibleToRequest,
+    isEligibleToRequest,
+    isEligibleForIssuance,
+    reasons: allReasons,
+    academicReasons,
+    evaluationReasons,
     enrollment,
+    criteria: {
+      enrollmentValid: validStatuses.includes(enrollment.status),
+      attendanceMet: !academicReasons.some((r) => r.toLowerCase().includes('attendance') || r.toLowerCase().includes('absence')),
+      assessmentsPassed: !academicReasons.some((r) => r.toLowerCase().includes('assessment')),
+      evaluationSubmitted: Boolean(evaluationExists),
+    },
   };
 }
 
@@ -133,11 +168,77 @@ async function getMyCertificates(studentId) {
   }
 
   // 1. Existing certificate requests or issued certificates
-  const certificates = await Certificate.find({ student: studentId })
+  const rawCertificates = await Certificate.find({ student: studentId })
     .populate('course', 'title code level certificateType certificationDetails')
     .populate('cohort', 'name startDate endDate')
     .populate('enrollment', 'status enrollmentDate packageType')
     .sort({ createdAt: -1 });
+
+  const certificates = [];
+
+  for (const certDoc of rawCertificates) {
+    const cert = certDoc.toObject ? certDoc.toObject() : { ...certDoc };
+    const evalDoc = await Evaluation.findOne({
+      student: studentId,
+      $or: [
+        { enrollment: cert.enrollment?._id || cert.enrollment },
+        { course: cert.course?._id || cert.course },
+      ],
+    });
+
+    const isCourseFeedbackDone = Boolean(evalDoc?.courseFeedbackCompleted || evalDoc?.ratings?.content);
+    const isAgencyFeedbackDone = Boolean(evalDoc?.agencyFeedbackCompleted);
+    const isFeedbackDone = isCourseFeedbackDone && isAgencyFeedbackDone;
+
+    cert.courseFeedbackCompleted = isCourseFeedbackDone;
+    cert.agencyFeedbackCompleted = isAgencyFeedbackDone;
+    cert.feedbackCompleted = isFeedbackDone;
+
+    if (certDoc.feedbackCompleted !== isFeedbackDone || certDoc.courseFeedbackCompleted !== isCourseFeedbackDone || certDoc.agencyFeedbackCompleted !== isAgencyFeedbackDone) {
+      await Certificate.updateOne(
+        { _id: certDoc._id },
+        {
+          $set: {
+            courseFeedbackCompleted: isCourseFeedbackDone,
+            agencyFeedbackCompleted: isAgencyFeedbackDone,
+            feedbackCompleted: isFeedbackDone,
+          },
+        }
+      );
+    }
+
+    const isDeadlinePassed = Boolean(
+      cert.feedbackDeadline &&
+      new Date() > new Date(cert.feedbackDeadline) &&
+      !isFeedbackDone
+    );
+
+    const adminCreated = Boolean(cert.adminCreated || cert.fileUrl || cert.status === 'UNDER_PREPARATION' || cert.status === 'ISSUED');
+    const isIssued = Boolean((cert.status === 'ISSUED' || cert.fileUrl) && cert.fileUrl);
+
+    let currentState = 'NAME_NOT_SUBMITTED';
+    if (isDeadlinePassed) {
+      currentState = 'DEADLINE_PASSED';
+    } else if (!cert.recipientName && !cert.certificateName) {
+      currentState = 'NAME_NOT_SUBMITTED';
+    } else if (!isFeedbackDone) {
+      currentState = 'NAME_SUBMITTED_FEEDBACK_INCOMPLETE';
+    } else if (isFeedbackDone && !adminCreated) {
+      currentState = 'FEEDBACK_COMPLETE_PENDING_ADMIN';
+    } else if (isFeedbackDone && adminCreated && !isIssued) {
+      currentState = 'CERTIFICATE_CREATED_PENDING_RELEASE';
+    } else if (isFeedbackDone && adminCreated && isIssued) {
+      currentState = 'CERTIFICATE_READY';
+    }
+
+    cert.adminCreated = adminCreated;
+    cert.isIssued = isIssued;
+    cert.isDeadlinePassed = isDeadlinePassed;
+    cert.currentState = currentState;
+    cert.canReceiveCertificate = currentState === 'CERTIFICATE_READY';
+
+    certificates.push(cert);
+  }
 
   const enrolledOrCertCourseIds = new Set(certificates.map((c) => c.course?._id?.toString()));
 
@@ -154,14 +255,17 @@ async function getMyCertificates(studentId) {
   for (const enr of enrollments) {
     if (enr.course && !enrolledOrCertCourseIds.has(enr.course._id.toString())) {
       const eligibility = await checkCertificateEligibility(studentId, enr._id);
-      if (eligibility.isEligible) {
+      if (eligibility.isEligibleToRequest) {
         eligibleEnrollments.push({
           enrollmentId: enr._id,
           course: enr.course,
           cohort: enr.cohort,
           suggestedName: user.fullName,
           isEligible: true,
+          isEligibleToRequest: true,
+          isEligibleForIssuance: eligibility.isEligibleForIssuance,
           status: 'ELIGIBLE',
+          feedbackCompleted: eligibility.criteria.evaluationSubmitted,
         });
       }
     }
@@ -178,8 +282,9 @@ async function getMyCertificates(studentId) {
  * Student submits the exact name for the official certificate.
  * - Does NOT issue the certificate.
  * - Sets status = 'NAME_SUBMITTED'.
- * - Locks name from arbitrary silent edits once under preparation.
- * - Stored in Certificate.recipientName without altering User.fullName.
+ * - Sets feedbackDeadline (14 days).
+ * - Notifies Administration of New Certificate Request.
+ * - Stored in Certificate.recipientName & certificateName without altering User.fullName.
  */
 async function submitCertificateName(studentId, enrollmentId, rawRecipientName) {
   const sanitizedName = validateAndSanitizeCertificateName(rawRecipientName);
@@ -211,14 +316,28 @@ async function submitCertificateName(studentId, enrollmentId, rawRecipientName) 
     }
   }
 
-  // Verify eligibility rules
+  // Verify eligibility rules (academic requirements must be met to submit request)
   const eligibility = await checkCertificateEligibility(studentId, enrollment._id);
-  if (!eligibility.isEligible) {
+  if (!eligibility.isEligibleToRequest) {
     throw new AppError(
-      `Certificate eligibility requirements not met: ${eligibility.reasons.join('; ')}`,
+      `Certificate eligibility requirements not met: ${eligibility.academicReasons.join('; ')}`,
       400
     );
   }
+
+  const evalDoc = await Evaluation.findOne({
+    student: studentId,
+    $or: [{ enrollment: enrollment._id }, { course: enrollment.course._id }],
+  });
+
+  const isCourseFeedbackDone = Boolean(evalDoc?.courseFeedbackCompleted || evalDoc?.ratings?.content);
+  const isAgencyFeedbackDone = Boolean(evalDoc?.agencyFeedbackCompleted);
+  const isFeedbackDone = isCourseFeedbackDone && isAgencyFeedbackDone;
+
+  // Set 14-day feedback deadline
+  const deadline = enrollment.cohort?.endDate
+    ? new Date(new Date(enrollment.cohort.endDate).getTime() + 14 * 24 * 60 * 60 * 1000)
+    : new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
 
   // Create or update Certificate with NAME_SUBMITTED status
   const certificate = await Certificate.findOneAndUpdate(
@@ -232,6 +351,10 @@ async function submitCertificateName(studentId, enrollmentId, rawRecipientName) 
         recipientName: sanitizedName,
         certificateName: sanitizedName,
         status: 'NAME_SUBMITTED',
+        courseFeedbackCompleted: isCourseFeedbackDone,
+        agencyFeedbackCompleted: isAgencyFeedbackDone,
+        feedbackCompleted: isFeedbackDone,
+        feedbackDeadline: deadline,
         submittedAt: new Date(),
         nameConfirmedAt: new Date(),
         nameConfirmedBy: 'student',
@@ -246,17 +369,41 @@ async function submitCertificateName(studentId, enrollmentId, rawRecipientName) 
     .populate('course', 'title code level certificateType')
     .populate('cohort', 'name');
 
-  // Notify student
+  // 1. Notify Student
   try {
+    const notifMsg = isFeedbackDone
+      ? `Your certificate request for "${enrollment.course.title}" has been submitted and is now awaiting creation by Academic Affairs / Administration.`
+      : `Your certificate request for "${enrollment.course.title}" has been submitted. Before you can receive your certificate, you must complete the required Course and Agency feedback forms.`;
+
     await Notification.create({
       recipient: studentId,
-      title: 'Certificate Name Submitted',
-      message: `Your certificate name "${sanitizedName}" for ${enrollment.course.title} has been submitted. The EGSA administration will prepare and upload your official certificate.`,
+      title: 'Certificate Request Submitted',
+      message: notifMsg,
       type: 'info',
       relatedCourse: enrollment.course._id,
     });
   } catch (notifErr) {
-    console.error('[CERTIFICATE] Failed to dispatch submission notification:', notifErr.message);
+    console.error('[CERTIFICATE] Failed to dispatch student submission notification:', notifErr.message);
+  }
+
+  // 2. Notify Administration (Section 18: Title 'New Certificate Request')
+  try {
+    let admins = [];
+    if (User && typeof User.find === 'function') {
+      const q = User.find({ role: { $in: ['admin', 'superadmin'] } });
+      admins = q && typeof q.select === 'function' ? await q.select('_id') : (await q) || [];
+    }
+    for (const admin of (Array.isArray(admins) ? admins : [])) {
+      await Notification.create({
+        recipient: admin._id,
+        title: 'New Certificate Request',
+        message: 'A student has submitted a certificate name and is awaiting certificate preparation.',
+        type: 'info',
+        relatedCourse: enrollment.course._id,
+      });
+    }
+  } catch (adminNotifErr) {
+    console.error('[CERTIFICATE] Failed to dispatch admin notification:', adminNotifErr.message);
   }
 
   return certificate;
@@ -269,6 +416,7 @@ async function confirmAndIssueCertificate(studentId, enrollmentId, rawRecipientN
   const cert = await submitCertificateName(studentId, enrollmentId, rawRecipientName);
   // Mark as issued for backward compatibility
   cert.status = 'ISSUED';
+  cert.feedbackCompleted = true;
   cert.issueDate = new Date();
   cert.certificateId = cert.certificateId || Certificate.generateCertificateId();
   cert.verificationToken = cert.verificationToken || Certificate.generateVerificationToken();
@@ -306,6 +454,26 @@ async function adminListCertificateRequests(filters = {}) {
     .populate('uploadedBy', 'fullName')
     .populate('issuedBy', 'fullName')
     .sort({ submittedAt: -1, createdAt: -1 });
+
+  for (const c of certs) {
+    if (c.student && c.course) {
+      const evalDoc = await Evaluation.findOne({
+        student: c.student._id || c.student,
+        $or: [
+          { enrollment: c.enrollment?._id || c.enrollment },
+          { course: c.course._id || c.course },
+        ],
+      });
+      const cDone = Boolean(evalDoc?.courseFeedbackCompleted || evalDoc?.ratings?.content);
+      const aDone = Boolean(evalDoc?.agencyFeedbackCompleted);
+      c.courseFeedbackCompleted = cDone;
+      c.agencyFeedbackCompleted = aDone;
+      c.feedbackCompleted = cDone && aDone;
+      if (!c.feedbackCompleted && (cDone && aDone)) {
+        await Certificate.updateOne({ _id: c._id }, { $set: { feedbackCompleted: true, courseFeedbackCompleted: true, agencyFeedbackCompleted: true } });
+      }
+    }
+  }
 
   if (search && search.trim()) {
     const s = search.trim().toLowerCase();
@@ -362,6 +530,56 @@ async function adminGetCertificateDetails(certificateId) {
 }
 
 /**
+ * Admin creates the Certificate based on student's submitted certificate name.
+ * Section 10 & 11:
+ * - Admin creates certificate using submitted name.
+ * - Idempotent: does not create duplicates if clicked twice.
+ * - Dispatches notification to student:
+ *   Title: 'Certificate Created'
+ *   Message: 'Your certificate has been created. Complete the required feedback if you have not already done so to receive it.'
+ */
+async function adminCreateCertificate(certificateId, adminUser) {
+  if (!['admin', 'superadmin'].includes(adminUser.role)) {
+    throw new AppError('Only administrators are authorized to create certificates.', 403);
+  }
+
+  const certificate = await Certificate.findById(certificateId)
+    .populate('student', 'fullName email')
+    .populate('course', 'title code');
+
+  if (!certificate) {
+    throw new AppError('Certificate record not found.', 404);
+  }
+
+  certificate.adminCreated = true;
+  certificate.createdByAdmin = adminUser._id;
+  certificate.adminCreatedAt = new Date();
+
+  if (certificate.status === 'NAME_SUBMITTED') {
+    certificate.status = 'UNDER_PREPARATION';
+  }
+
+  certificate.certificateId = certificate.certificateId || Certificate.generateCertificateId();
+  certificate.verificationToken = certificate.verificationToken || Certificate.generateVerificationToken();
+  await certificate.save();
+
+  // Notify student
+  try {
+    await Notification.create({
+      recipient: certificate.student._id,
+      title: 'Certificate Created',
+      message: 'Your certificate has been created. Complete the required feedback if you have not already done so to receive it.',
+      type: 'info',
+      relatedCourse: certificate.course?._id,
+    });
+  } catch (notifErr) {
+    console.error('[CERTIFICATE] Failed to dispatch certificate created notification:', notifErr.message);
+  }
+
+  return certificate;
+}
+
+/**
  * Admin: Upload official certificate file (PDF/Image) and optionally issue.
  */
 async function adminUploadCertificateFile(certificateId, adminUser, file, issueNow = false, adminNotes = '') {
@@ -388,10 +606,49 @@ async function adminUploadCertificateFile(certificateId, adminUser, file, issueN
   certificate.fileSizeBytes = file.size;
   certificate.uploadedBy = adminUser._id;
   certificate.uploadedAt = new Date();
+  certificate.adminCreated = true;
+  certificate.createdByAdmin = adminUser._id;
+  certificate.adminCreatedAt = certificate.adminCreatedAt || new Date();
   if (adminNotes) certificate.adminNotes = adminNotes.trim();
 
   if (issueNow) {
+    // Check mandatory feedback before issuing
+    const evalDoc = await Evaluation.findOne({
+      student: certificate.student._id || certificate.student,
+      $or: [
+        { enrollment: certificate.enrollment?._id || certificate.enrollment },
+        { course: certificate.course?._id || certificate.course },
+      ],
+    });
+
+    const isCourseFeedbackDone = Boolean(
+      certificate.courseFeedbackCompleted ||
+      evalDoc?.courseFeedbackCompleted ||
+      evalDoc?.ratings?.content ||
+      (certificate.feedbackCompleted && !evalDoc)
+    );
+    const isAgencyFeedbackDone = Boolean(
+      certificate.agencyFeedbackCompleted ||
+      evalDoc?.agencyFeedbackCompleted ||
+      (certificate.feedbackCompleted && !evalDoc)
+    );
+    const isFeedbackDone = isCourseFeedbackDone && isAgencyFeedbackDone;
+
+    if (certificate.feedbackDeadline && new Date() > new Date(certificate.feedbackDeadline) && !isFeedbackDone) {
+      throw new AppError('Cannot issue certificate: The feedback deadline has passed without required completion.', 400);
+    }
+
+    if (!isCourseFeedbackDone || !isAgencyFeedbackDone) {
+      throw new AppError(
+        'Cannot issue certificate: Mandatory course feedback has not been submitted by the student yet (Both Course Feedback and Egyptian Space Agency Feedback are required).',
+        400
+      );
+    }
+
     certificate.status = 'ISSUED';
+    certificate.feedbackCompleted = true;
+    certificate.courseFeedbackCompleted = true;
+    certificate.agencyFeedbackCompleted = true;
     certificate.issueDate = new Date();
     certificate.issuedBy = adminUser._id;
     certificate.certificateId = certificate.certificateId || Certificate.generateCertificateId();
@@ -432,7 +689,44 @@ async function adminIssueCertificate(certificateId, adminUser) {
     );
   }
 
+  // Check mandatory feedback before issuing
+  const evalDoc = await Evaluation.findOne({
+    student: certificate.student._id || certificate.student,
+    $or: [
+      { enrollment: certificate.enrollment?._id || certificate.enrollment },
+      { course: certificate.course?._id || certificate.course },
+    ],
+  });
+
+  const isCourseFeedbackDone = Boolean(
+    certificate.courseFeedbackCompleted ||
+    evalDoc?.courseFeedbackCompleted ||
+    evalDoc?.ratings?.content ||
+    (certificate.feedbackCompleted && !evalDoc)
+  );
+  const isAgencyFeedbackDone = Boolean(
+    certificate.agencyFeedbackCompleted ||
+    evalDoc?.agencyFeedbackCompleted ||
+    (certificate.feedbackCompleted && !evalDoc)
+  );
+  const isFeedbackDone = isCourseFeedbackDone && isAgencyFeedbackDone;
+
+  if (certificate.feedbackDeadline && new Date() > new Date(certificate.feedbackDeadline) && !isFeedbackDone) {
+    throw new AppError('Cannot issue certificate: The feedback deadline has passed without required completion.', 400);
+  }
+
+  if (!isCourseFeedbackDone || !isAgencyFeedbackDone) {
+    throw new AppError(
+      'Cannot issue certificate: Mandatory course feedback has not been submitted by the student yet (Both Course Feedback and Egyptian Space Agency Feedback are required).',
+      400
+    );
+  }
+
   certificate.status = 'ISSUED';
+  certificate.feedbackCompleted = true;
+  certificate.courseFeedbackCompleted = true;
+  certificate.agencyFeedbackCompleted = true;
+  certificate.adminCreated = true;
   certificate.issueDate = new Date();
   certificate.issuedBy = adminUser._id;
   certificate.certificateId = certificate.certificateId || Certificate.generateCertificateId();
@@ -453,12 +747,12 @@ async function notifyAndEmailStudentOnIssuance(certificate) {
   const courseTitle = certificate.course?.title || 'Training Program';
   const recipientName = certificate.recipientName;
 
-  // 1. In-App Notification
+  // 1. In-App Notification (Section 18: Title 'Certificate Ready', Message 'Your certificate is now available.')
   try {
     await Notification.create({
       recipient: student._id,
-      title: 'Your Certificate Is Ready | تم إصدار شهادتك',
-      message: `Your EGSA Space Academy certificate for ${courseTitle} has been officially issued with the name "${recipientName}". You can now view and download it from your Certificate section.`,
+      title: 'Certificate Ready',
+      message: 'Your certificate is now available.',
       type: 'success',
       relatedCourse: certificate.course?._id,
     });
@@ -488,7 +782,7 @@ async function adminUpdateStatus(certificateId, adminUser, newStatus) {
     throw new AppError('Only administrators can update certificate status.', 403);
   }
 
-  const validStatuses = ['NAME_SUBMITTED', 'UNDER_PREPARATION', 'ISSUED'];
+  const validStatuses = ['NAME_SUBMITTED', 'UNDER_PREPARATION', 'ISSUED', 'REVOKED', 'Revoked'];
   if (!validStatuses.includes(newStatus)) {
     throw new AppError(`Invalid status: ${newStatus}`, 400);
   }
@@ -498,11 +792,29 @@ async function adminUpdateStatus(certificateId, adminUser, newStatus) {
     throw new AppError('Certificate record not found.', 404);
   }
 
-  if (newStatus === 'ISSUED' && !certificate.fileUrl) {
-    throw new AppError('Cannot mark as ISSUED without an uploaded certificate file.', 400);
+  const normalizedStatus = newStatus.toUpperCase() === 'REVOKED' ? 'REVOKED' : newStatus;
+
+  if (normalizedStatus === 'ISSUED') {
+    if (!certificate.fileUrl) {
+      throw new AppError('Cannot mark as ISSUED without an uploaded certificate file.', 400);
+    }
+    const evaluationExists = await Evaluation.exists({
+      student: certificate.student._id || certificate.student,
+      $or: [
+        { enrollment: certificate.enrollment?._id || certificate.enrollment },
+        { course: certificate.course?._id || certificate.course },
+      ],
+    });
+    if (!evaluationExists) {
+      throw new AppError(
+        'Cannot mark as ISSUED: Mandatory course feedback has not been submitted by the student yet.',
+        400
+      );
+    }
+    certificate.feedbackCompleted = true;
   }
 
-  certificate.status = newStatus;
+  certificate.status = normalizedStatus;
   await certificate.save();
   return certificate;
 }
@@ -605,6 +917,7 @@ module.exports = {
   adminListCertificateRequests,
   adminGetCertificateDetails,
   adminUploadCertificateFile,
+  adminCreateCertificate,
   adminIssueCertificate,
   adminUpdateStatus,
   correctCertificateName,

@@ -287,28 +287,31 @@ async function verifyAndFinalizePayment({ transactionId, providerPayload = {}, s
     payload: mergedPayload,
   });
 
-  if (!verifyResult.isVerified || verifyResult.status === 'FAILED') {
-    transaction.status = 'Failed';
-    transaction.failureReason = verifyResult.failureReason || 'Payment declined by gateway.';
+  if (!verifyResult.isVerified || verifyResult.status === 'FAILED' || verifyResult.status === 'CANCELLED') {
+    const isCancelled = verifyResult.status === 'CANCELLED';
+    transaction.status = isCancelled ? 'Cancelled' : 'Failed';
+    transaction.failureReason = verifyResult.failureReason || (isCancelled ? 'Checkout session was cancelled.' : 'Payment declined by gateway.');
     await transaction.save();
 
-    // Revert invoice status to Pending so student can retry
+    // Revert invoice status to Pending / Invoice Issued so student can retry
     if (transaction.invoice) {
       await Invoice.findByIdAndUpdate(transaction.invoice._id, { status: 'Pending' });
     }
 
-    try {
-      await notify({
-        recipient: transaction.student._id,
-        title: 'Payment Transaction Failed',
-        message: `Your payment of ${transaction.amount} EGP could not be completed: ${transaction.failureReason}. Please review your payment details and try again.`,
-        type: 'warning',
-      });
-    } catch (_) {}
+    if (!isCancelled) {
+      try {
+        await notify({
+          recipient: transaction.student._id,
+          title: 'Payment Transaction Failed',
+          message: `Your payment of ${transaction.amount} EGP could not be completed: ${transaction.failureReason}. Please review your payment details and try again.`,
+          type: 'warning',
+        });
+      } catch (_) {}
+    }
 
     return {
       success: false,
-      status: 'FAILED',
+      status: isCancelled ? 'CANCELLED' : 'FAILED',
       failureReason: transaction.failureReason,
       transaction,
       invoice: transaction.invoice,
@@ -373,6 +376,9 @@ async function verifyAndFinalizePayment({ transactionId, providerPayload = {}, s
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+
+    application.enrollment = enrollment._id;
+    await application.save();
   }
 
   // Non-blocking email dispatch (failure will never rollback successful payment)
@@ -413,12 +419,21 @@ async function verifyAndFinalizePayment({ transactionId, providerPayload = {}, s
     console.error('[EMAIL ERROR] Failed to dispatch payment confirmation email:', emailErr.message);
   }
 
-  // In-app notification
+  // In-app notifications
   try {
     await notify({
       recipient: transaction.student._id,
-      title: 'Payment Confirmed & Enrollment Finalized',
-      message: `Your payment of ${transaction.amount} ${transaction.currency} for ${application?.course?.title || 'your program'} has been confirmed! Access is now unlocked in My Training.`,
+      title: 'Payment Confirmed',
+      message: 'Your payment has been successfully confirmed.',
+      type: 'success',
+      relatedCourse: invoiceDoc.course,
+      relatedApplication: application?._id,
+    });
+
+    await notify({
+      recipient: transaction.student._id,
+      title: 'Enrollment Confirmed',
+      message: 'You are now enrolled in the selected cohort.',
       type: 'success',
       relatedCourse: invoiceDoc.course,
       relatedApplication: application?._id,
@@ -528,19 +543,41 @@ async function confirmPayment({ invoice, method = 'Card', packageType = 'WITHOUT
   // Confirm or create Enrollment
   let enrollment = null;
   if (application) {
-    enrollment = await Enrollment.create({
-      student: updatedInvoice.student,
-      course: updatedInvoice.course,
-      cohort: application.cohort,
-      application: application._id,
-      invoice: updatedInvoice._id,
-      status: 'Confirmed',
-      packageType: finalPackageType,
-      paidAmount: finalAmount,
-      enrolledAt: new Date(),
-      transportationRequired: finalPackageType === 'WITH_TRANSPORTATION',
-      paymentStatus: 'Paid',
-    });
+    const studentId = updatedInvoice.student?._id || updatedInvoice.student;
+    const courseId = updatedInvoice.course?._id || updatedInvoice.course;
+
+    let existing = null;
+    try {
+      existing = await Enrollment.findOne({ student: studentId, course: courseId });
+    } catch (e) {
+      existing = null;
+    }
+
+    if (existing) {
+      existing.cohort = application.cohort;
+      existing.application = application._id;
+      existing.invoice = updatedInvoice._id;
+      existing.status = 'Confirmed';
+      existing.packageType = finalPackageType;
+      existing.paidAmount = finalAmount;
+      existing.transportationRequired = finalPackageType === 'WITH_TRANSPORTATION';
+      existing.paymentStatus = 'Paid';
+      enrollment = await existing.save();
+    } else {
+      enrollment = await Enrollment.create({
+        student: studentId,
+        course: courseId,
+        cohort: application.cohort,
+        application: application._id,
+        invoice: updatedInvoice._id,
+        status: 'Confirmed',
+        packageType: finalPackageType,
+        paidAmount: finalAmount,
+        transportationRequired: finalPackageType === 'WITH_TRANSPORTATION',
+        paymentStatus: 'Paid',
+        enrolledAt: new Date(),
+      });
+    }
   }
 
   // Non-blocking confirmation email dispatch
@@ -603,6 +640,115 @@ async function confirmPayment({ invoice, method = 'Card', packageType = 'WITHOUT
 }
 
 /**
+ * Releases a seat held by an application and automatically promotes the top waitlisted candidate if available.
+ */
+async function releaseSeatAndPromoteWaitlist(cohortId) {
+  if (!cohortId) return { promoted: null };
+
+  let nextCandidate = null;
+  try {
+    const q = Application.findOne({
+      cohort: cohortId,
+      status: 'Waitlisted',
+    });
+    if (q && typeof q.sort === 'function') {
+      nextCandidate = await q
+        .sort({ waitlistPosition: 1, createdAt: 1 })
+        .populate('student')
+        .populate('course');
+    } else if (q && typeof q.then === 'function') {
+      nextCandidate = await q;
+    }
+  } catch (err) {
+    nextCandidate = null;
+  }
+
+  if (nextCandidate && nextCandidate.student) {
+    nextCandidate.status = 'Accepted';
+    nextCandidate.waitlistPosition = undefined;
+    nextCandidate.statusHistory = nextCandidate.statusHistory || [];
+    nextCandidate.statusHistory.push({
+      status: 'Accepted',
+      note: 'Automatically promoted from waitlist after a seat became available.',
+      changedAt: new Date(),
+    });
+    await nextCandidate.save();
+
+    // Recompute remaining waitlist positions
+    let remainingWaitlisted = [];
+    try {
+      const findQuery = Application.find({
+        cohort: cohortId,
+        status: 'Waitlisted',
+      });
+      if (findQuery && typeof findQuery.sort === 'function') {
+        remainingWaitlisted = (await findQuery.sort({ waitlistPosition: 1, createdAt: 1 })) || [];
+      } else if (findQuery && typeof findQuery.then === 'function') {
+        remainingWaitlisted = (await findQuery) || [];
+      }
+    } catch (err) {
+      remainingWaitlisted = [];
+    }
+
+    for (let i = 0; i < remainingWaitlisted.length; i++) {
+      remainingWaitlisted[i].waitlistPosition = i + 1;
+      await remainingWaitlisted[i].save();
+    }
+
+    // Issue invoice with 72-hour deadline
+    let invoice = null;
+    try {
+      invoice = await Invoice.findOne({ application: nextCandidate._id });
+    } catch (e) {
+      invoice = null;
+    }
+    if (!invoice && nextCandidate.course) {
+      invoice = await issueInvoice({
+        student: nextCandidate.student._id,
+        application: nextCandidate._id,
+        course: nextCandidate.course,
+      });
+    }
+
+    try {
+      const { sendApplicationAcceptedEmail } = require('../utils/email');
+      const basePrice = nextCandidate.course?.price || 0;
+      const transPrice = nextCandidate.course?.transportationPrice != null ? nextCandidate.course.transportationPrice : 500;
+      await sendApplicationAcceptedEmail({
+        to: nextCandidate.student.email,
+        fullName: nextCandidate.student.fullName,
+        courseTitle: nextCandidate.course.title,
+        courseLevel: nextCandidate.course.level,
+        applicationNumber: nextCandidate.referenceNumber,
+        basePrice,
+        transportationPrice: transPrice,
+        paymentDeadline: invoice?.dueDate,
+        preferredLanguage: nextCandidate.student.preferredLanguage || 'en',
+      });
+    } catch (_) {}
+
+    try {
+      await notify({
+        recipient: nextCandidate.student._id,
+        title: 'Promoted from Waitlist — Space Academy',
+        message: `A seat became available! Your application for ${nextCandidate.course.title} has been accepted. Please complete your tuition payment within 72 hours.`,
+        type: 'success',
+        relatedCourse: nextCandidate.course._id,
+        relatedApplication: nextCandidate._id,
+      });
+    } catch (_) {}
+
+    return { promoted: nextCandidate };
+  } else {
+    await Cohort.findOneAndUpdate(
+      { _id: cohortId, seatsTaken: { $gt: 0 } },
+      { $inc: { seatsTaken: -1 } }
+    );
+    return { promoted: null };
+  }
+}
+
+/**
  * Handle expired reservation when 72h payment deadline passes.
  */
 async function handleExpiredReservation(invoice) {
@@ -615,21 +761,21 @@ async function handleExpiredReservation(invoice) {
   const application = await Application.findById(invoice.application);
   if (!application) return;
 
-  if (application.cohort) {
-    await Cohort.findOneAndUpdate(
-      { _id: application.cohort, seatsTaken: { $gt: 0 } },
-      { $inc: { seatsTaken: -1 } }
-    );
-  }
+  const wasHoldingSeat = ['Accepted', 'Eligible - Payment Pending'].includes(application.status);
 
   application.status = 'Cancelled';
   application.statusHistory = application.statusHistory || [];
   application.statusHistory.push({
     status: 'Cancelled',
     note: 'Payment deadline passed; seat reservation expired.',
+    changedAt: new Date(),
   });
   if (typeof application.save === 'function') {
     await application.save();
+  }
+
+  if (wasHoldingSeat && application.cohort) {
+    await releaseSeatAndPromoteWaitlist(application.cohort);
   }
 
   try {
@@ -640,6 +786,26 @@ async function handleExpiredReservation(invoice) {
       type: 'error',
     });
   } catch (_) {}
+}
+
+/**
+ * Scans for invoices past their 72h payment deadline and processes them idempotently.
+ */
+async function processExpiredInvoices() {
+  try {
+    const now = new Date();
+    const expiredInvoices = await Invoice.find({
+      status: { $in: ['Invoice Issued', 'Pending', 'Payment Initiated'] },
+      amount: { $gt: 0 },
+      dueDate: { $lt: now, $ne: null },
+    });
+
+    for (const inv of expiredInvoices) {
+      await handleExpiredReservation(inv);
+    }
+  } catch (err) {
+    console.error('[EXPIRY JOB] Error processing expired reservations:', err.message);
+  }
 }
 
 /**
@@ -748,6 +914,8 @@ module.exports = {
   verifyAndFinalizePayment,
   confirmPayment,
   handleExpiredReservation,
+  releaseSeatAndPromoteWaitlist,
+  processExpiredInvoices,
   adminListPayments,
   adminGetPaymentDetails,
 };

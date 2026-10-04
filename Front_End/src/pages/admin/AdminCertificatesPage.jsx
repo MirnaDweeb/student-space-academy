@@ -23,6 +23,7 @@ export default function AdminCertificatesPage() {
 
   // Quick Issue State
   const [issuingId, setIssuingId] = useState(null);
+  const [creatingId, setCreatingId] = useState(null);
 
   const load = () => {
     setLoading(true);
@@ -35,6 +36,20 @@ export default function AdminCertificatesPage() {
   };
 
   useEffect(load, []);
+
+  const handleCreateCertificate = async (cert) => {
+    setCreatingId(cert._id);
+    setError('');
+    try {
+      await adminService.createCertificate(cert._id);
+      setActionSuccess(`Certificate for "${cert.certificateName || cert.recipientName}" successfully created by Admin. Student notified.`);
+      load();
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to create certificate.');
+    } finally {
+      setCreatingId(null);
+    }
+  };
 
   const handleFileChange = (e) => {
     const file = e.target.files[0];
@@ -112,6 +127,8 @@ export default function AdminCertificatesPage() {
     if (activeTab === 'submitted' && normStatus !== 'NAME_SUBMITTED') return false;
     if (activeTab === 'prep' && normStatus !== 'UNDER_PREPARATION') return false;
     if (activeTab === 'issued' && normStatus !== 'ISSUED') return false;
+    if (activeTab === 'waiting_feedback' && c.feedbackCompleted) return false;
+    if (activeTab === 'feedback_completed' && !c.feedbackCompleted) return false;
 
     if (search.trim()) {
       const q = search.trim().toLowerCase();
@@ -128,6 +145,8 @@ export default function AdminCertificatesPage() {
   const submittedCount = certificates.filter((c) => String(c.status).toUpperCase() === 'NAME_SUBMITTED').length;
   const prepCount = certificates.filter((c) => String(c.status).toUpperCase() === 'UNDER_PREPARATION').length;
   const issuedCount = certificates.filter((c) => String(c.status).toUpperCase() === 'ISSUED').length;
+  const pendingFeedbackCount = certificates.filter((c) => !c.feedbackCompleted && String(c.status).toUpperCase() !== 'ISSUED').length;
+  const feedbackCompletedCount = certificates.filter((c) => c.feedbackCompleted).length;
 
   if (loading) return <LoadingState label="Loading certificate requests queue..." />;
 
@@ -135,39 +154,17 @@ export default function AdminCertificatesPage() {
     <div className="container-fluid py-4 px-md-5">
       <PageHeader
         title="Official Certificate Management Queue"
-        subtitle="Review student confirmed names, verify academic credentials, upload official certificates (PDF/Images), and release credentials."
+        subtitle="Review student confirmed names, verify academic credentials, check feedback completion, upload official certificates (PDF/Images), and release credentials."
         breadcrumbs={[
           { label: 'Admin Management', to: '/admin/applications' },
           { label: 'Certificate Queue' },
         ]}
+        actions={
+          <button className="btn btn-outline-secondary btn-sm" onClick={load} title="Refresh records">
+            <i className="fa-solid fa-arrows-rotate me-1"></i> Refresh Queue
+          </button>
+        }
       />
-
-      {/* Admin Section Tabs Navigation */}
-      <div className="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-4 pb-2 border-bottom">
-        <ul className="nav nav-pills">
-          <li className="nav-item">
-            <Link to="/admin/applications" className="nav-link text-muted">
-              <i className="fa-solid fa-file-signature me-2"></i>
-              Admissions Applications
-            </Link>
-          </li>
-          <li className="nav-item">
-            <Link to="/admin/certificates" className="nav-link active bg-primary-egsa text-white">
-              <i className="fa-solid fa-award me-2"></i>
-              Certificate Queue ({certificates.length})
-            </Link>
-          </li>
-          <li className="nav-item">
-            <Link to="/admin/payments" className="nav-link text-muted">
-              <i className="fa-solid fa-credit-card me-2"></i>
-              Payments & Invoices
-            </Link>
-          </li>
-        </ul>
-        <button className="btn btn-outline-secondary btn-sm" onClick={load} title="Refresh records">
-          <i className="fa-solid fa-arrows-rotate me-1"></i> Refresh Queue
-        </button>
-      </div>
 
       {/* Statistics Counter Cards */}
       <div className="row g-3 mb-4">
@@ -179,14 +176,14 @@ export default function AdminCertificatesPage() {
         </div>
         <div className="col-sm-6 col-xl-3">
           <div className="egsa-card p-3 border-start border-4 border-warning">
-            <span className="text-muted small text-uppercase fw-bold">Name Submitted (New)</span>
-            <h3 className="fw-bold text-warning mt-1 mb-0">{submittedCount}</h3>
+            <span className="text-muted small text-uppercase fw-bold">Pending Feedback</span>
+            <h3 className="fw-bold text-warning mt-1 mb-0">{pendingFeedbackCount}</h3>
           </div>
         </div>
         <div className="col-sm-6 col-xl-3">
           <div className="egsa-card p-3 border-start border-4 border-info">
-            <span className="text-muted small text-uppercase fw-bold">Under Preparation</span>
-            <h3 className="fw-bold text-info mt-1 mb-0">{prepCount}</h3>
+            <span className="text-muted small text-uppercase fw-bold">Feedback Completed</span>
+            <h3 className="fw-bold text-info mt-1 mb-0">{feedbackCompletedCount}</h3>
           </div>
         </div>
         <div className="col-sm-6 col-xl-3">
@@ -217,8 +214,8 @@ export default function AdminCertificatesPage() {
       {/* Filter and Search Bar */}
       <div className="egsa-card p-3 mb-4">
         <div className="row g-3 align-items-center justify-content-between">
-          <div className="col-md-6">
-            <div className="btn-group" role="group">
+          <div className="col-md-8">
+            <div className="btn-group flex-wrap" role="group">
               <button
                 type="button"
                 className={`btn btn-sm ${activeTab === 'all' ? 'btn-primary-egsa text-white' : 'btn-outline-secondary'}`}
@@ -232,6 +229,20 @@ export default function AdminCertificatesPage() {
                 onClick={() => setActiveTab('submitted')}
               >
                 Name Submitted ({submittedCount})
+              </button>
+              <button
+                type="button"
+                className={`btn btn-sm ${activeTab === 'waiting_feedback' ? 'btn-danger text-white' : 'btn-outline-secondary'}`}
+                onClick={() => setActiveTab('waiting_feedback')}
+              >
+                Feedback Pending ({pendingFeedbackCount})
+              </button>
+              <button
+                type="button"
+                className={`btn btn-sm ${activeTab === 'feedback_completed' ? 'btn-success text-white' : 'btn-outline-secondary'}`}
+                onClick={() => setActiveTab('feedback_completed')}
+              >
+                Feedback Completed ({feedbackCompletedCount})
               </button>
               <button
                 type="button"
@@ -282,6 +293,7 @@ export default function AdminCertificatesPage() {
                 <th>Certificate Name</th>
                 <th>Submission Date</th>
                 <th>Status</th>
+                <th>Feedback Status</th>
                 <th>Official Certificate File</th>
                 <th className="text-end pe-4">Actions</th>
               </tr>
@@ -289,7 +301,7 @@ export default function AdminCertificatesPage() {
             <tbody>
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan="7" className="text-center py-5 text-muted">
+                  <td colSpan="8" className="text-center py-5 text-muted">
                     <i className="fa-solid fa-folder-open fa-3x mb-3 text-secondary opacity-50 d-block"></i>
                     No certificate requests found matching criteria.
                   </td>
@@ -297,26 +309,30 @@ export default function AdminCertificatesPage() {
               ) : (
                 filtered.map((cert) => {
                   const normStatus = String(cert.status).toUpperCase();
+                  const isAdminCreated = Boolean(cert.adminCreated || normStatus === 'UNDER_PREPARATION' || normStatus === 'ISSUED');
                   let statusBadge = (
                     <span className="badge bg-warning-subtle text-dark border border-warning-subtle px-2 py-1">
                       <i className="fa-solid fa-hourglass-start me-1"></i> Name Submitted
                     </span>
                   );
-                  if (normStatus === 'UNDER_PREPARATION') {
-                    statusBadge = (
-                      <span className="badge bg-info-subtle text-info-emphasis border border-info-subtle px-2 py-1">
-                        <i className="fa-solid fa-gears me-1"></i> Under Preparation
-                      </span>
-                    );
-                  } else if (normStatus === 'ISSUED') {
+                  if (normStatus === 'ISSUED') {
                     statusBadge = (
                       <span className="badge bg-success-subtle text-success border border-success-subtle px-2 py-1">
                         <i className="fa-solid fa-check-circle me-1"></i> Issued
                       </span>
                     );
+                  } else if (isAdminCreated) {
+                    statusBadge = (
+                      <span className="badge bg-info-subtle text-info-emphasis border border-info-subtle px-2 py-1">
+                        <i className="fa-solid fa-stamp me-1"></i> Admin Created
+                      </span>
+                    );
                   }
 
                   const certName = cert.certificateName || cert.recipientName;
+                  const isCourseDone = Boolean(cert.courseFeedbackCompleted);
+                  const isAgencyDone = Boolean(cert.agencyFeedbackCompleted);
+                  const isAllFeedbackDone = Boolean(cert.feedbackCompleted || (isCourseDone && isAgencyDone));
 
                   return (
                     <tr key={cert._id}>
@@ -350,8 +366,9 @@ export default function AdminCertificatesPage() {
                       {/* Submitted Certificate Name */}
                       <td>
                         <div className="p-2 bg-light rounded border d-inline-block">
+                          <small className="text-muted d-block" style={{ fontSize: '0.72rem' }}>Submitted Name:</small>
                           <strong className="text-primary-egsa font-monospace" style={{ fontSize: '0.95rem' }}>
-                            {certName}
+                            "{certName}"
                           </strong>
                         </div>
                       </td>
@@ -363,6 +380,36 @@ export default function AdminCertificatesPage() {
 
                       {/* Status */}
                       <td>{statusBadge}</td>
+
+                      {/* Granular Feedback Status (Course + Agency) */}
+                      <td>
+                        <div className="d-flex flex-column gap-1 small" style={{ minWidth: '135px' }}>
+                          <div className="d-flex align-items-center justify-content-between">
+                            <span className="text-muted me-1">Course:</span>
+                            {isCourseDone ? (
+                              <span className="badge bg-success-subtle text-success border border-success-subtle px-2 py-0">
+                                <i className="fa-solid fa-check me-1"></i> Completed
+                              </span>
+                            ) : (
+                              <span className="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle px-2 py-0">
+                                <i className="fa-solid fa-clock me-1"></i> Pending
+                              </span>
+                            )}
+                          </div>
+                          <div className="d-flex align-items-center justify-content-between">
+                            <span className="text-muted me-1">Agency:</span>
+                            {isAgencyDone ? (
+                              <span className="badge bg-success-subtle text-success border border-success-subtle px-2 py-0">
+                                <i className="fa-solid fa-check me-1"></i> Completed
+                              </span>
+                            ) : (
+                              <span className="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle px-2 py-0">
+                                <i className="fa-solid fa-clock me-1"></i> Pending
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </td>
 
                       {/* Uploaded File Reference */}
                       <td>
@@ -396,29 +443,55 @@ export default function AdminCertificatesPage() {
                       {/* Actions */}
                       <td className="text-end pe-4">
                         <div className="d-flex align-items-center justify-content-end gap-1">
+                          {/* Create Certificate Button */}
+                          {!isAdminCreated && (
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-primary px-3 fw-semibold text-white shadow-sm"
+                              onClick={() => handleCreateCertificate(cert)}
+                              disabled={creatingId === cert._id}
+                              title="Create the official certificate using the student's submitted name"
+                            >
+                              {creatingId === cert._id ? (
+                                <>
+                                  <i className="fa-solid fa-spinner fa-spin me-1"></i> Creating…
+                                </>
+                              ) : (
+                                <>
+                                  <i className="fa-solid fa-stamp me-1"></i> Create Certificate
+                                </>
+                              )}
+                            </button>
+                          )}
+
                           {/* Prepare / Upload Button */}
                           <button
                             type="button"
-                            className="btn btn-sm btn-primary-egsa text-white px-3"
+                            className="btn btn-sm btn-outline-primary px-2"
                             onClick={() => {
                               setSelectedCertForUpload(cert);
                               setSelectedFile(null);
                               setUploadError('');
                               setAdminNotes(cert.adminNotes || '');
                             }}
+                            title="Upload official PDF / Image certificate template"
                           >
                             <i className="fa-solid fa-upload me-1"></i>
-                            {cert.fileUrl ? 'Replace / Re-issue' : 'Prepare / Upload'}
+                            {cert.fileUrl ? 'Replace File' : 'Upload File'}
                           </button>
 
-                          {/* Quick Issue Button (Enabled only if file is already uploaded and not issued) */}
+                          {/* Quick Issue Button (Enabled only if file is uploaded and both feedback forms are completed) */}
                           {cert.fileUrl && normStatus !== 'ISSUED' && (
                             <button
                               type="button"
-                              className="btn btn-sm btn-success text-white px-2"
+                              className={`btn btn-sm ${isAllFeedbackDone ? 'btn-success' : 'btn-secondary opacity-75'} text-white px-2`}
                               onClick={() => handleIssueDirect(cert)}
-                              disabled={issuingId === cert._id}
-                              title="Mark as Issued and send student email"
+                              disabled={issuingId === cert._id || !isAllFeedbackDone}
+                              title={
+                                !isAllFeedbackDone
+                                  ? 'Cannot issue: Student must complete both Course and Agency feedback first'
+                                  : 'Mark as Issued and send student email'
+                              }
                             >
                               {issuingId === cert._id ? (
                                 <i className="fa-solid fa-spinner fa-spin"></i>
@@ -470,28 +543,53 @@ export default function AdminCertificatesPage() {
                   style={{ borderRadius: '8px', borderLeft: '4px solid var(--color-primary, #0f2b48)' }}
                 >
                   <div className="row g-3">
-                    <div className="col-md-4">
+                    <div className="col-md-3">
                       <span className="text-muted d-block small">Student:</span>
                       <strong className="text-dark fs-6">{selectedCertForUpload.student?.fullName || 'Student'}</strong>
                       <span className="d-block text-muted small">{selectedCertForUpload.student?.email}</span>
                     </div>
-                    <div className="col-md-4">
+                    <div className="col-md-3">
                       <span className="text-muted d-block small">Course:</span>
                       <strong className="text-dark fs-6">{selectedCertForUpload.course?.title || 'Course'}</strong>
                       <span className="d-block text-muted small">{selectedCertForUpload.cohort?.name || 'Cohort'}</span>
                     </div>
-                    <div className="col-md-4">
+                    <div className="col-md-3">
                       <span className="text-muted d-block small">Certificate Name:</span>
                       <strong className="text-primary-egsa fs-5 font-monospace" style={{ wordBreak: 'break-word' }}>
                         {selectedCertForUpload.certificateName || selectedCertForUpload.recipientName}
                       </strong>
                     </div>
+                    <div className="col-md-3">
+                      <span className="text-muted d-block small">Course Feedback:</span>
+                      {selectedCertForUpload.feedbackCompleted ? (
+                        <span className="badge bg-success-subtle text-success border border-success-subtle px-2 py-1 mt-1">
+                          <i className="fa-solid fa-circle-check me-1"></i> Completed
+                        </span>
+                      ) : (
+                        <span className="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle px-2 py-1 mt-1">
+                          <i className="fa-solid fa-clock me-1"></i> Pending
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <div className="mt-3 pt-2 border-top text-muted small d-flex align-items-center gap-2">
                     <i className="fa-solid fa-circle-info text-primary-egsa"></i>
-                    <span>This is the name the Admin should use when preparing the student's certificate.</span>
+                    <span>This is the official recipient name submitted by the student for certificate generation.</span>
                   </div>
                 </div>
+
+                {/* Feedback Pending Notice */}
+                {!selectedCertForUpload.feedbackCompleted && (
+                  <div className="alert alert-warning py-2 px-3 mb-4 d-flex align-items-start gap-2 small">
+                    <i className="fa-solid fa-triangle-exclamation text-warning fs-5 mt-1"></i>
+                    <div>
+                      <strong>Mandatory Course Feedback Not Submitted:</strong>
+                      <div>
+                        The student has not completed their required course feedback. You may upload the certificate and click <strong>Save as Under Preparation</strong>, but <strong>direct issuance is locked</strong> until the student submits their feedback.
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* 3. Existing uploaded file (if replacing) */}
                 {selectedCertForUpload.fileUrl && (
@@ -571,12 +669,21 @@ export default function AdminCertificatesPage() {
                     Save as Under Preparation
                   </button>
 
-                  {/* Action 2: Upload & Issue Certificate */}
+                  {/* Action 2: Upload & Issue Certificate (Gated by feedbackCompleted) */}
                   <button
                     type="button"
                     className="btn btn-success px-4 fw-semibold text-white shadow-sm"
                     onClick={() => handleUpload(true)}
-                    disabled={isUploading || (!selectedFile && !selectedCertForUpload.fileUrl)}
+                    disabled={
+                      isUploading ||
+                      (!selectedFile && !selectedCertForUpload.fileUrl) ||
+                      !selectedCertForUpload.feedbackCompleted
+                    }
+                    title={
+                      !selectedCertForUpload.feedbackCompleted
+                        ? 'Cannot issue: Student must complete mandatory course feedback first'
+                        : 'Upload file and issue certificate immediately'
+                    }
                   >
                     {isUploading ? (
                       <>

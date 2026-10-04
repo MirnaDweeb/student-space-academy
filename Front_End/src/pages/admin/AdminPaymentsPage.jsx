@@ -1,5 +1,4 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { Link } from 'react-router-dom';
 import { adminService } from '../../services/cycleServices';
 import { LoadingState, StatusBadge, PageHeader } from '../../components/StateComponents.jsx';
 
@@ -63,6 +62,31 @@ export default function AdminPaymentsPage() {
     .filter((p) => p.status === 'Paid')
     .reduce((sum, p) => sum + (p.amount || 0), 0);
 
+  const handleExportCSV = () => {
+    if (!filteredPayments || filteredPayments.length === 0) return;
+    const headers = ['Invoice Number', 'Student Name', 'Email', 'National ID', 'Course Title', 'Package Type', 'Amount (EGP)', 'Status', 'Due Date', 'Created At'];
+    const rows = filteredPayments.map((p) => [
+      `"${p.invoiceNumber || p._id}"`,
+      `"${p.student?.fullName || ''}"`,
+      `"${p.student?.email || ''}"`,
+      `"${p.student?.nationalId || ''}"`,
+      `"${p.course?.title || ''}"`,
+      `"${p.packageType || 'WITHOUT_TRANSPORTATION'}"`,
+      p.amount || 0,
+      `"${p.status}"`,
+      `"${p.dueDate ? new Date(p.dueDate).toLocaleDateString() : ''}"`,
+      `"${new Date(p.createdAt).toLocaleDateString()}"`,
+    ]);
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `EGSA_Tuition_Payments_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   if (loading) return <LoadingState label="Loading EGSA financial ledger and tuition payments…" />;
 
   return (
@@ -76,31 +100,24 @@ export default function AdminPaymentsPage() {
         ]}
       />
 
-      {/* Admin Section Tabs Navigation */}
+      {/* Action Toolbar */}
       <div className="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-4 pb-2 border-bottom">
-        <ul className="nav nav-pills">
-          <li className="nav-item">
-            <Link to="/admin/applications" className="nav-link text-muted">
-              <i className="fa-solid fa-file-signature me-2"></i>
-              Admissions Applications
-            </Link>
-          </li>
-          <li className="nav-item">
-            <Link to="/admin/certificates" className="nav-link text-muted">
-              <i className="fa-solid fa-award me-2"></i>
-              Certificate Queue
-            </Link>
-          </li>
-          <li className="nav-item">
-            <Link to="/admin/payments" className="nav-link active bg-primary-egsa text-white">
-              <i className="fa-solid fa-credit-card me-2"></i>
-              Payments & Invoices
-            </Link>
-          </li>
-        </ul>
-        <button className="btn btn-outline-secondary btn-sm" onClick={load} title="Refresh records">
-          <i className="fa-solid fa-arrows-rotate me-1"></i> Refresh Ledger
-        </button>
+        <div className="text-muted small">
+          <i className="bi bi-wallet2 me-1 text-primary"></i> Financial records and student tuition transactions
+        </div>
+        <div className="d-flex gap-2">
+          <button
+            className="btn btn-outline-primary btn-sm"
+            onClick={handleExportCSV}
+            disabled={filteredPayments.length === 0}
+            title="Export filtered transactions to CSV"
+          >
+            <i className="bi bi-file-earmark-spreadsheet me-1"></i> Export CSV
+          </button>
+          <button className="btn btn-outline-secondary btn-sm" onClick={load} title="Refresh records">
+            <i className="bi bi-arrow-clockwise me-1"></i> Refresh Ledger
+          </button>
+        </div>
       </div>
 
       {/* KPI Stats Cards */}

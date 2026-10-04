@@ -277,43 +277,102 @@ export const evaluationService = {
 
   async getEvaluations() {
     const userId = getCurrentUserId();
-    const enrollmentsRes = await enrollmentService.my();
+    const [enrollmentsRes, serverEvalsRes] = await Promise.all([
+      enrollmentService.my().catch(() => ({ data: [] })),
+      api.get('/evaluations/my').catch(() => ({ data: { data: [] } })),
+    ]);
+
     const enrollments = enrollmentsRes.data || [];
-
-    return enrollments.map((enr) => {
-      const course = enr.course || {};
-      const storageKey = this.getStorageKey(userId, course._id);
-      const savedData = localStorage.getItem(storageKey);
-      const submission = savedData ? JSON.parse(savedData) : null;
-
-      return {
-        enrollmentId: enr._id,
-        courseId: course._id,
-        courseTitle: course.title,
-        instructor: course.instructor || 'Dr. Mohamed El-Sayed (EGSA)',
-        isCompleted: !!submission,
-        submission,
-        status: submission ? 'Submitted' : 'Pending Evaluation',
-        availableDate: enr.createdAt || new Date().toISOString(),
-      };
+    const serverEvals = serverEvalsRes.data?.data || [];
+    const evalMap = new Map();
+    serverEvals.forEach((ev) => {
+      const cId = String(ev.course?._id || ev.course);
+      evalMap.set(cId, ev);
     });
-  },
 
-  async submitEvaluation({ courseId, ratings, comments }) {
-    const userId = getCurrentUserId();
-    const storageKey = this.getStorageKey(userId, courseId);
+    return Promise.all(
+      enrollments.map(async (enr) => {
+        const course = enr.course || {};
+        const courseIdStr = String(course._id);
+        let submission = evalMap.get(courseIdStr) || null;
 
-    const payload = {
-      courseId,
-      ratings, // { content, instructor, labs, organization }
-      comments, // { highlights, improvements }
-      submittedAt: new Date().toISOString(),
-    };
+        // Auto-migration from legacy localStorage if present and not yet on server
+        if (!submission && userId && course._id) {
+          const storageKey = this.getStorageKey(userId, course._id);
+          const savedData = localStorage.getItem(storageKey);
+          if (savedData) {
+            try {
+              const localParsed = JSON.parse(savedData);
+              if (localParsed?.ratings) {
+                const syncRes = await api.post('/evaluations', {
+                  courseId: course._id,
+                  ratings: localParsed.ratings,
+                  comments: localParsed.comments,
+                });
+                submission = syncRes.data?.data || localParsed;
+                localStorage.removeItem(storageKey);
+              }
+            } catch (_) {}
+          }
+        }
 
-    localStorage.setItem(storageKey, JSON.stringify(payload));
-    return { success: true, data: payload };
-  },
-};
+          const isCourseCompleted = Boolean(submission?.courseFeedbackCompleted || submission?.ratings?.content);
+          const isAgencyCompleted = Boolean(submission?.agencyFeedbackCompleted);
+          const isCompleted = isCourseCompleted && isAgencyCompleted;
+
+          return {
+            enrollmentId: enr._id,
+            courseId: course._id,
+            courseTitle: course.title,
+            courseCode: course.code,
+            cohortName: enr.cohort?.name,
+            instructor: course.instructor || 'EGSA Faculty',
+            isCourseCompleted,
+            isAgencyCompleted,
+            isCompleted,
+            submission,
+            status: isCompleted ? 'Submitted' : (isCourseCompleted ? 'Agency Feedback Required' : 'Course Feedback Required'),
+            availableDate: enr.createdAt || new Date().toISOString(),
+          };
+        })
+      );
+    },
+
+    async submitEvaluation({ courseId, ratings, comments }) {
+      const res = await api.post('/evaluations', {
+        courseId,
+        ratings,
+        comments,
+      });
+
+      const userId = getCurrentUserId();
+      if (userId && courseId) {
+        localStorage.removeItem(this.getStorageKey(userId, courseId));
+      }
+
+      return res.data;
+    },
+
+    async submitAgencyEvaluation({ courseId, ratings, comments, recommendAgency }) {
+      const res = await api.post('/evaluations/agency', {
+        courseId,
+        agencyRatings: ratings,
+        comments,
+        recommendAgency,
+      });
+      return res.data;
+    },
+
+    async getEvaluationForCourse(courseId) {
+      const res = await api.get(`/evaluations/course/${courseId}`);
+      return res.data?.data || null;
+    },
+
+    async getEvaluationStatus(courseId) {
+      const res = await api.get(`/evaluations/status/${courseId}`);
+      return res.data?.data || null;
+    },
+  };
 
 /**
  * MEDIA / TRAINING MATERIALS SERVICE
@@ -570,16 +629,31 @@ export const certificateCriteriaService = {
 
     const certificates = certsRes.data || [];
     const enrollments = enrollmentsRes.data || [];
+    const evaluationSubmitted = evaluations.some((e) => e.isCompleted);
 
     if (certificates.length > 0) {
+      const activeCert = certificates[0];
+      const isCourseDone = Boolean(activeCert.courseFeedbackCompleted);
+      const isAgencyDone = Boolean(activeCert.agencyFeedbackCompleted);
+      const isFeedbackDone = Boolean(activeCert.feedbackCompleted || (isCourseDone && isAgencyDone));
+
       return {
-        isCertified: true,
+        isCertified: Boolean(activeCert.isIssued && activeCert.canReceiveCertificate),
         certificates,
         criteria: null,
         defaultStudentName: certsRes.defaultStudentName || null,
         eligibleEnrollments: certsRes.eligibleEnrollments || [],
         eligibleEnrollment: certsRes.eligibleEnrollments?.[0] || null,
         enrollment: enrollments[0] || null,
+        feedbackCompleted: isFeedbackDone,
+        courseFeedbackCompleted: isCourseDone,
+        agencyFeedbackCompleted: isAgencyDone,
+        adminCreated: Boolean(activeCert.adminCreated),
+        isIssued: Boolean(activeCert.isIssued),
+        canReceiveCertificate: Boolean(activeCert.canReceiveCertificate),
+        currentState: activeCert.currentState,
+        isDeadlinePassed: Boolean(activeCert.isDeadlinePassed),
+        feedbackDeadline: activeCert.feedbackDeadline,
       };
     }
 
@@ -625,11 +699,10 @@ export const certificateCriteriaService = {
       assessmentsDesc = 'No mandatory assessment barriers configured for this curriculum.';
     }
 
-    const evaluationSubmitted = evaluations.some((e) => e.isCompleted);
-
     const hasBackendEligible = certsRes.eligibleEnrollments && certsRes.eligibleEnrollments.length > 0;
-    const allCoreMet = hasPaid && attendancePassed && assessmentsPassed && evaluationSubmitted;
-    const isEligibleForIssuance = hasBackendEligible || allCoreMet;
+    const academicRequirementsMet = hasPaid && attendancePassed && assessmentsPassed;
+    const isEligibleToRequest = hasBackendEligible || academicRequirementsMet;
+    const isEligibleForIssuance = (hasBackendEligible || academicRequirementsMet) && evaluationSubmitted;
 
     const criteriaList = [
       {
@@ -672,12 +745,14 @@ export const certificateCriteriaService = {
     const progressPercent = Math.round((completedCount / criteriaList.length) * 100);
 
     const eligibleEnrollment =
-      certsRes.eligibleEnrollments?.[0] || (isEligibleForIssuance ? enrollments[0] : null);
+      certsRes.eligibleEnrollments?.[0] || (isEligibleToRequest ? enrollments[0] : null);
 
     return {
       isCertified: false,
       certificates: [],
+      isEligibleToRequest,
       isEligibleForIssuance,
+      feedbackCompleted: evaluationSubmitted,
       eligibleEnrollment,
       defaultStudentName: certsRes.defaultStudentName || null,
       criteria: {
@@ -685,6 +760,8 @@ export const certificateCriteriaService = {
         completedCount,
         totalCount: criteriaList.length,
         progressPercent,
+        academicRequirementsMet,
+        evaluationSubmitted,
       },
       enrollment: enrollments[0] || null,
     };

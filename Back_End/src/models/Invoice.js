@@ -24,6 +24,10 @@ const InvoiceSchema = new mongoose.Schema(
     cancelledAt: { type: Date },
     expiredAt: { type: Date },
 
+    // Gateway integration tracking
+    stripeCheckoutSessionId: { type: String, sparse: true, index: true },
+    stripePaymentIntentId: { type: String, sparse: true, index: true },
+
     // Refund audit fields (prepared for refunds architecture)
     refundAmount: { type: Number, default: 0 },
     refundReason: { type: String },

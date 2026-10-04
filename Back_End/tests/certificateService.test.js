@@ -4,6 +4,7 @@ jest.mock('../src/models/Assessment');
 jest.mock('../src/models/AssessmentResult');
 jest.mock('../src/models/User');
 jest.mock('../src/models/Notification');
+jest.mock('../src/models/Evaluation');
 jest.mock('../src/services/attendanceService');
 jest.mock('../src/utils/email');
 
@@ -14,6 +15,7 @@ const Assessment = require('../src/models/Assessment');
 const AssessmentResult = require('../src/models/AssessmentResult');
 const User = require('../src/models/User');
 const Notification = require('../src/models/Notification');
+const Evaluation = require('../src/models/Evaluation');
 const attendanceService = require('../src/services/attendanceService');
 const { sendCertificateReadyEmail } = require('../src/utils/email');
 
@@ -95,6 +97,7 @@ describe('Certificate Service — Student Request & Admin Workflow', () => {
     Certificate.generateCertificateId = jest.fn(() => 'EGSA-CERT-789012');
     Certificate.generateVerificationToken = jest.fn(() => 'abc123tokenhex456');
     Notification.create = jest.fn().mockResolvedValue({});
+    Evaluation.exists = jest.fn().mockResolvedValue({ _id: 'eval-1' });
     sendCertificateReadyEmail.mockResolvedValue({ success: true });
   });
 
@@ -230,6 +233,9 @@ describe('Certificate Service — Student Request & Admin Workflow', () => {
       recipientName: 'Sara Ahmed Mohamed Hassan',
       fileUrl: '/uploads/certificates/egsa_cert_123.pdf',
       status: 'UNDER_PREPARATION',
+      feedbackCompleted: true,
+      courseFeedbackCompleted: true,
+      agencyFeedbackCompleted: true,
       student: { _id: studentId, fullName: 'Sara Ahmed', email: 'sara@example.com' },
       course: mockCourse,
       save: jest.fn().mockResolvedValue(true),

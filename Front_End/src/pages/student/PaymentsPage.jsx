@@ -27,6 +27,7 @@ export default function PaymentsPage() {
 
   // Official Receipt Modal state
   const [receiptData, setReceiptData] = useState(null);
+  const [stripeNotice, setStripeNotice] = useState(null);
 
   // Load invoices and applications
   const loadData = async () => {
@@ -64,6 +65,85 @@ export default function PaymentsPage() {
   useEffect(() => {
     loadData();
   }, [queryAppId]);
+
+  // Handle return from Stripe hosted checkout session
+  useEffect(() => {
+    const sessionId = searchParams.get('session_id');
+    const cancelled = searchParams.get('cancelled');
+
+    if (cancelled === 'true') {
+      setStripeNotice({
+        type: 'warning',
+        title: isAr ? 'تم إلغاء جلسة الدفع' : 'Payment Session Cancelled',
+        message: isAr
+          ? 'تم إلغاء عملية الدفع ولم يتم خصم أي مبالغ. يظل حجزك المقبول متاحاً لإعادة المحاولة.'
+          : 'Payment session was cancelled. No charges were made. Your accepted reservation remains open to retry before the deadline.',
+      });
+    } else if (sessionId) {
+      setStripeNotice({
+        type: 'info',
+        title: isAr ? 'جاري التحقق من حالة السداد...' : 'Verifying Payment Settlement...',
+        message: isAr
+          ? 'جاري تأكيد معاملتك المالية مع وكالة الفضاء المصرية ونظام الدفع. يرجى الانتظار...'
+          : 'Confirming your payment with the Egyptian Space Agency financial settlement system. Please wait a moment...',
+      });
+
+      let attempts = 0;
+      const maxAttempts = 4;
+      const pollStatus = async () => {
+        try {
+          attempts++;
+          const res = await paymentService.getSessionStatus(sessionId);
+          if (res.isSettled || res.status === 'Paid') {
+            setStripeNotice({
+              type: 'success',
+              title: isAr ? 'تم تأكيد الدفع بنجاح!' : 'Payment Confirmed Successfully!',
+              message: isAr
+                ? 'تم استلام المبلغ وتأكيد التحاقك بالبرنامج التدريبي. تم فتح جميع محتويات التدريب في منصتك.'
+                : 'Payment has been settled and verified. Your training program enrollment is finalized!',
+            });
+            await loadData();
+            if (res.invoice && res.transaction) {
+              setReceiptData({
+                invoice: res.invoice,
+                transaction: res.transaction,
+                course: res.invoice.course,
+                cohort: res.invoice.cohort,
+                packageType: res.transaction.packageType || res.invoice.packageType,
+                amount: res.transaction.amount || res.invoice.amount,
+                currency: res.transaction.currency || res.invoice.currency || 'EGP',
+                paidAt: res.transaction.paymentDate || res.invoice.paidAt || new Date().toISOString(),
+              });
+            }
+          } else if (attempts < maxAttempts) {
+            setTimeout(pollStatus, 2500);
+          } else {
+            setStripeNotice({
+              type: 'info',
+              title: isAr ? 'عملية الدفع قيد التأكيد' : 'Payment Processing',
+              message: isAr
+                ? 'تم استلام طلب السداد وجاري معالجته عبر البنك. يرجى تحديث الصفحة بعد قليل لمراجعة حالة الفاتورة.'
+                : 'Your payment was received and is awaiting webhook settlement from Stripe. Please refresh this page shortly to view the confirmed status.',
+            });
+            await loadData();
+          }
+        } catch (err) {
+          setStripeNotice({
+            type: 'warning',
+            title: isAr ? 'حالة السداد' : 'Payment Status',
+            message:
+              err.response?.data?.message ||
+              (isAr
+                ? 'يرجى مراجعة قائمة الفواتير أدناه للتأكد من حالة السداد.'
+                : 'Please check your invoices list below for current settlement status.'),
+          });
+          await loadData();
+        }
+      };
+
+      pollStatus();
+    }
+  }, [searchParams]);
 
   // Identify accepted applications that require payment and have not been paid
   const pendingAcceptedApps = useMemo(() => {
@@ -139,7 +219,11 @@ export default function PaymentsPage() {
 
       // Step 1: Initiate payment on backend
       const initRes = await paymentService.initiate(payload);
-      const { transaction, invoice, redirectUrl, isMock, clientSecret } = initRes.data;
+      const redirectUrl = initRes.data?.redirectUrl || initRes.data?.paymentUrl;
+      const isMock = initRes.data?.isMock ?? false;
+      const transaction = initRes.data?.transaction;
+      const invoice = initRes.data?.invoice;
+      const clientSecret = initRes.data?.clientSecret || initRes.data?.sessionToken;
 
       setCheckoutStep('processing');
 
@@ -175,7 +259,7 @@ export default function PaymentsPage() {
           paidAt: settledInvoice.paidAt || new Date().toISOString(),
         });
       } else {
-        // If a real redirect gateway is configured in production, redirect student
+        // Real Stripe redirect
         window.location.href = redirectUrl;
       }
     } catch (err) {
@@ -215,6 +299,36 @@ export default function PaymentsPage() {
           { label: isAr ? 'المدفوعات' : 'Payments' },
         ]}
       />
+
+      {/* Stripe Payment Notification / Feedback Banner */}
+      {stripeNotice && (
+        <div
+          className={`alert alert-${stripeNotice.type === 'error' ? 'danger' : stripeNotice.type} alert-dismissible fade show mb-4 shadow-sm border-0`}
+          role="alert"
+        >
+          <div className="d-flex align-items-center gap-2">
+            <i
+              className={`fa-solid ${
+                stripeNotice.type === 'success'
+                  ? 'fa-circle-check fs-5 text-success'
+                  : stripeNotice.type === 'warning'
+                  ? 'fa-triangle-exclamation fs-5 text-warning'
+                  : 'fa-spinner fa-spin fs-5 text-info'
+              }`}
+            ></i>
+            <div>
+              <strong className="d-block">{stripeNotice.title}</strong>
+              <span className="small">{stripeNotice.message}</span>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn-close"
+            aria-label="Close"
+            onClick={() => setStripeNotice(null)}
+          ></button>
+        </div>
+      )}
 
       {/* Payment Deadline Policy Notice */}
       <div className="egsa-card mb-4 border-start border-4 border-warning bg-light-subtle p-3 p-md-4">

@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -23,19 +24,29 @@ const adminRoutes = require('./routes/adminRoutes');
 const attendanceRoutes = require('./routes/attendanceRoutes');
 const mediaRoutes = require('./routes/mediaRoutes');
 const assessmentRoutes = require('./routes/assessmentRoutes');
+const evaluationRoutes = require('./routes/evaluationRoutes');
 const dashboardController = require('./controllers/dashboardController');
 const { protect } = require('./middleware/auth');
+
+const secureUploadsHandler = require('./middleware/secureUploads');
 
 const app = express();
 
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(cors({ origin: process.env.CLIENT_URL || '*', credentials: true }));
-app.use(express.json({ limit: '25mb' }));
+app.use(
+  express.json({
+    limit: '25mb',
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(express.urlencoded({ limit: '25mb', extended: true }));
 app.use(morgan('dev'));
 
-// Static serving for uploaded institutional training media
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+// Protected serving for uploaded institutional training media, certificates, and academic submissions
+app.use('/uploads', secureUploadsHandler);
 
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 300 });
 app.use('/api', limiter);
@@ -58,6 +69,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/media', mediaRoutes);
 app.use('/api/assessments', assessmentRoutes);
+app.use('/api/evaluations', evaluationRoutes);
 app.get('/api/dashboard', protect, dashboardController.getDashboard);
 
 app.use(notFound);

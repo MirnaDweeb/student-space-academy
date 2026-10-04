@@ -3,51 +3,243 @@ import { useParams, Link } from 'react-router-dom';
 import { applicationService } from '../../services/cycleServices';
 import { LoadingState, ErrorState, StatusBadge, PageHeader } from '../../components/StateComponents.jsx';
 
-const PIPELINE_STEPS = [
-  { key: 'Submitted', label: 'Application Submitted' },
-  { key: 'Readiness', label: 'Readiness / Eligibility' },
-  { key: 'Review', label: 'Review & Seat Allocation' },
-  { key: 'Payment', label: 'Payment & Confirmation' },
-  { key: 'Enrolled', label: 'Enrolled in Cohort' },
-];
+export function computeAdmissionsPipeline(application) {
+  if (!application) return [];
 
-function getPipelineStepState(stepKey, currentStatus) {
-  const statusOrderMap = {
-    Draft: 0,
-    Submitted: 1,
-    'Readiness Required': 2,
-    'Foundation Recommended': 2,
-    'Manual Review': 3,
-    'Under Review': 3,
-    Waitlisted: 3,
-    Accepted: 4,
-    'Eligible - Payment Pending': 4,
-    Confirmed: 5,
-    'In Progress': 5,
-    Completed: 6,
+  const course = application.course || {};
+  const cohort = application.cohort || {};
+  const readiness = application.readinessAttempt || null;
+  const invoice = application.invoice || null;
+  const enrollment = application.enrollment || null;
+  const status = application.status || 'Draft';
+  const fit = application.fitResultSnapshot || null;
+
+  // 1. Application Submitted Step
+  const step1 = {
+    key: 'Submitted',
+    label: 'Application Submitted',
+    state: 'completed',
+    statusText: 'Completed',
+    subtitle: `Application registered ref: ${application.referenceNumber || application._id?.slice(-6)?.toUpperCase()}`,
+    date: application.submittedAt || application.createdAt,
+    action: null,
   };
 
-  const currentLevel = statusOrderMap[currentStatus] ?? 1;
+  // 2. Readiness / Eligibility Step
+  const isPrereqBlocked =
+    status === 'Foundation Recommended' ||
+    application.eligibilityStatus === 'Not Eligible' ||
+    fit?.result === 'Foundation Required' ||
+    readiness?.outcome === 'FOUNDATION_REQUIRED';
 
-  switch (stepKey) {
-    case 'Submitted':
-      return currentLevel >= 1 ? 'completed' : 'upcoming';
-    case 'Readiness':
-      if (currentStatus === 'Readiness Required') return 'current';
-      if (currentStatus === 'Foundation Recommended') return 'warning';
-      return currentLevel > 2 ? 'completed' : 'upcoming';
-    case 'Review':
-      if (currentStatus === 'Under Review' || currentStatus === 'Manual Review' || currentStatus === 'Waitlisted') return 'current';
-      return currentLevel > 3 ? 'completed' : 'upcoming';
-    case 'Payment':
-      if (currentStatus === 'Accepted' || currentStatus === 'Eligible - Payment Pending') return 'current';
-      return currentLevel > 4 ? 'completed' : 'upcoming';
-    case 'Enrolled':
-      if (currentStatus === 'Confirmed' || currentStatus === 'In Progress' || currentStatus === 'Completed') return 'completed';
-      return 'upcoming';
-    default:
-      return 'upcoming';
+  const isReadinessCompleted =
+    application.eligibilityStatus === 'Eligible' ||
+    (readiness && readiness.status === 'Submitted' && readiness.outcome !== 'FOUNDATION_REQUIRED');
+
+  const isReadinessInProgress =
+    application.eligibilityStatus === 'In Progress' ||
+    (readiness && readiness.status === 'InProgress');
+
+  let step2;
+  if (isPrereqBlocked) {
+    step2 = {
+      key: 'Readiness',
+      label: 'Readiness / Eligibility',
+      state: 'blocked',
+      statusText: 'Not Eligible',
+      subtitle: 'Prerequisite or foundational knowledge required prior to enrollment',
+      action: {
+        label: 'Review Foundation Requirements',
+        to: `/student/courses/${course._id}/fit`,
+        variant: 'outline-warning',
+        icon: 'fa-solid fa-triangle-exclamation',
+      },
+    };
+  } else if (isReadinessCompleted) {
+    step2 = {
+      key: 'Readiness',
+      label: 'Readiness / Eligibility',
+      state: 'completed',
+      statusText: 'Completed / Eligible',
+      subtitle: readiness?.score != null
+        ? `Readiness passed: ${readiness.score}% score (${readiness.outcome?.replace(/_/g, ' ') || 'READY'})`
+        : 'Eligibility requirements satisfied',
+      action: null,
+    };
+  } else if (isReadinessInProgress) {
+    step2 = {
+      key: 'Readiness',
+      label: 'Readiness / Eligibility',
+      state: 'current',
+      statusText: 'In Progress',
+      subtitle: 'Readiness assessment session in progress',
+      action: {
+        label: 'Continue Readiness Assessment',
+        to: `/student/readiness/start?courseId=${course._id}`,
+        variant: 'primary',
+        icon: 'fa-solid fa-pen-to-square',
+      },
+    };
+  } else {
+    // Not started yet
+    step2 = {
+      key: 'Readiness',
+      label: 'Readiness / Eligibility',
+      state: 'current',
+      statusText: 'Action Required',
+      subtitle: 'Complete readiness pre-test to qualify for seat review',
+      action: {
+        label: 'Complete Readiness / Eligibility',
+        to: `/student/readiness/start?courseId=${course._id}`,
+        variant: 'primary',
+        icon: 'fa-solid fa-pen-to-square',
+      },
+    };
   }
+
+  // 3. Review & Seat Allocation Step
+  let step3;
+  if (isPrereqBlocked) {
+    step3 = {
+      key: 'Review',
+      label: 'Review & Seat Allocation',
+      state: 'blocked',
+      statusText: 'Not Available',
+      subtitle: 'Seat allocation locked due to prerequisite requirements',
+      action: null,
+    };
+  } else if (!isReadinessCompleted) {
+    step3 = {
+      key: 'Review',
+      label: 'Review & Seat Allocation',
+      state: 'locked',
+      statusText: 'Upcoming milestone',
+      subtitle: 'Locked — Complete Readiness / Eligibility first',
+      action: null,
+    };
+  } else if (status === 'Rejected') {
+    step3 = {
+      key: 'Review',
+      label: 'Review & Seat Allocation',
+      state: 'blocked',
+      statusText: 'Application Rejected',
+      subtitle: application.rejectionReason || 'Application not accepted for this training intake',
+      action: null,
+    };
+  } else if (status === 'Waitlisted') {
+    step3 = {
+      key: 'Review',
+      label: 'Review & Seat Allocation',
+      state: 'warning',
+      statusText: 'Waitlisted',
+      subtitle: `Position #${application.waitlistPosition || 1} on waitlist. Awaiting seat availability.`,
+      action: null,
+    };
+  } else if (['Submitted', 'Under Review', 'Manual Review'].includes(status)) {
+    step3 = {
+      key: 'Review',
+      label: 'Review & Seat Allocation',
+      state: 'current',
+      statusText: 'Under Review',
+      subtitle: 'Academic Committee reviewing application and allocating seats',
+      action: null,
+    };
+  } else if (['Accepted', 'Eligible - Payment Pending', 'Confirmed', 'In Progress', 'Completed'].includes(status)) {
+    step3 = {
+      key: 'Review',
+      label: 'Review & Seat Allocation',
+      state: 'completed',
+      statusText: 'Seat Allocated & Approved',
+      subtitle: `Approved for cohort: ${cohort.name || 'Assigned Cohort'}`,
+      action: null,
+    };
+  } else {
+    step3 = {
+      key: 'Review',
+      label: 'Review & Seat Allocation',
+      state: 'locked',
+      statusText: 'Upcoming milestone',
+      subtitle: 'Awaiting academic evaluation',
+      action: null,
+    };
+  }
+
+  // 4. Payment & Confirmation Step
+  const isPaid = invoice?.status === 'Paid' || ['Confirmed', 'In Progress', 'Completed'].includes(status);
+  let step4;
+  if (['Accepted', 'Eligible - Payment Pending'].includes(status)) {
+    if (isPaid) {
+      step4 = {
+        key: 'Payment',
+        label: 'Payment & Confirmation',
+        state: 'completed',
+        statusText: 'Payment Confirmed',
+        subtitle: `Tuition settled (${invoice?.amount?.toLocaleString() || 0} ${invoice?.currency || 'EGP'})`,
+        action: null,
+      };
+    } else {
+      step4 = {
+        key: 'Payment',
+        label: 'Payment & Confirmation',
+        state: 'current',
+        statusText: 'Payment Required',
+        subtitle: 'Seat reserved. Complete payment to confirm official enrollment.',
+        action: {
+          label: 'Proceed to Payment',
+          to: `/student/payments?applicationId=${application._id}`,
+          variant: 'primary',
+          icon: 'fa-solid fa-credit-card',
+        },
+      };
+    }
+  } else if (['Confirmed', 'In Progress', 'Completed'].includes(status) || isPaid) {
+    step4 = {
+      key: 'Payment',
+      label: 'Payment & Confirmation',
+      state: 'completed',
+      statusText: 'Payment Confirmed',
+      subtitle: `Tuition settled (${invoice?.amount?.toLocaleString() || 0} ${invoice?.currency || 'EGP'})`,
+      action: null,
+    };
+  } else {
+    step4 = {
+      key: 'Payment',
+      label: 'Payment & Confirmation',
+      state: 'locked',
+      statusText: 'Payment Locked',
+      subtitle: 'Accessible only after formal acceptance and seat allocation',
+      action: null,
+    };
+  }
+
+  // 5. Enrolled in Cohort Step
+  let step5;
+  if (['Confirmed', 'In Progress', 'Completed'].includes(status) || enrollment) {
+    step5 = {
+      key: 'Enrolled',
+      label: 'Enrolled in Cohort',
+      state: 'completed',
+      statusText: 'Enrolled in Cohort',
+      subtitle: `${cohort.name || 'Training Cohort'}${cohort.startDate ? ' • Starts ' + new Date(cohort.startDate).toLocaleDateString() : ''}`,
+      action: {
+        label: 'View Training & Schedule',
+        to: '/student/training',
+        variant: 'secondary',
+        icon: 'fa-solid fa-award',
+      },
+    };
+  } else {
+    step5 = {
+      key: 'Enrolled',
+      label: 'Enrolled in Cohort',
+      state: 'locked',
+      statusText: 'Upcoming milestone',
+      subtitle: 'Final enrollment will be confirmed upon payment settlement',
+      action: null,
+    };
+  }
+
+  return [step1, step2, step3, step4, step5];
 }
 
 export default function ApplicationDetailPage() {
@@ -55,6 +247,9 @@ export default function ApplicationDetailPage() {
   const [application, setApplication] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [cancelling, setCancelling] = useState(false);
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancelError, setCancelError] = useState('');
 
   const load = () => {
     setLoading(true);
@@ -68,6 +263,20 @@ export default function ApplicationDetailPage() {
 
   useEffect(load, [id]);
 
+  const handleCancelApplication = async () => {
+    setCancelling(true);
+    setCancelError('');
+    try {
+      await applicationService.cancel(id);
+      setShowCancelModal(false);
+      load();
+    } catch (err) {
+      setCancelError(err.response?.data?.message || 'Failed to cancel application.');
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   if (loading) return <LoadingState label="Loading application details…" />;
   if (error) return <ErrorState message={error} onRetry={load} />;
   if (!application) return null;
@@ -76,6 +285,7 @@ export default function ApplicationDetailPage() {
   const cohort = application.cohort || {};
   const readiness = application.readinessAttempt || null;
   const history = application.statusHistory || [];
+  const canCancel = ['Draft', 'Submitted', 'Under Review', 'Manual Review', 'Accepted', 'Eligible - Payment Pending', 'Waitlisted'].includes(application.status);
 
   return (
     <div>
@@ -88,9 +298,20 @@ export default function ApplicationDetailPage() {
           { label: course.title || 'Details' },
         ]}
         actions={
-          <Link to="/student/applications" className="btn btn-outline-secondary btn-sm">
-            <i className="fa-solid fa-arrow-left me-1"></i> Back to Applications
-          </Link>
+          <div className="d-flex gap-2">
+            <Link to="/student/applications" className="btn btn-outline-secondary btn-sm">
+              <i className="fa-solid fa-arrow-left me-1"></i> Back to Applications
+            </Link>
+            {canCancel && (
+              <button
+                type="button"
+                className="btn btn-outline-danger btn-sm"
+                onClick={() => setShowCancelModal(true)}
+              >
+                <i className="fa-solid fa-ban me-1"></i> Cancel Application
+              </button>
+            )}
+          </div>
         }
       />
 
@@ -126,7 +347,7 @@ export default function ApplicationDetailPage() {
                         Congratulations! Your application has been approved by the EGSA Academic Committee. Please choose your package and complete payment.
                       </p>
                     </div>
-                    <Link to="/student/payments" className="btn btn-primary btn-sm px-3 mt-2 mt-sm-0">
+                    <Link to={`/student/payments?applicationId=${application._id}`} className="btn btn-primary btn-sm px-3 mt-2 mt-sm-0">
                       <i className="fa-solid fa-credit-card me-1"></i> Choose Package & Pay
                     </Link>
                   </div>
@@ -155,15 +376,32 @@ export default function ApplicationDetailPage() {
                 </div>
               )}
 
-              {(application.status === 'Under Review' || application.status === 'Submitted') && (
+              {application.status === 'Under Review' && (
                 <div>
                   <h6 className="fw-bold text-primary-egsa mb-1">
                     <i className="fa-solid fa-clock-rotate-left me-2"></i>
-                    Application Submitted & Under Review
+                    Application Under Review
                   </h6>
                   <p className="text-muted small mb-0">
-                    Your application is currently under review by the EGSA Academic Committee. Once approved, you will receive an acceptance email with tuition payment instructions.
+                    Your application and eligibility results are currently under review by the EGSA Academic Committee. Decisions and seat allocation are published upon review completion.
                   </p>
+                </div>
+              )}
+
+              {application.status === 'Submitted' && (
+                <div className="d-flex flex-column flex-sm-row justify-content-between align-items-start align-items-sm-center gap-2">
+                  <div>
+                    <h6 className="fw-bold text-primary-egsa mb-1">
+                      <i className="fa-solid fa-file-circle-check me-2"></i>
+                      Application Submitted — Readiness Assessment Required
+                    </h6>
+                    <p className="text-muted small mb-0">
+                      Your application has been registered. Please complete the prerequisite readiness assessment to qualify for seat review.
+                    </p>
+                  </div>
+                  <Link to={`/student/readiness/start?courseId=${course._id}`} className="btn btn-primary btn-sm px-3 mt-2 mt-sm-0 text-nowrap">
+                    <i className="fa-solid fa-pen-to-square me-1"></i> Start Assessment
+                  </Link>
                 </div>
               )}
 
@@ -248,6 +486,22 @@ export default function ApplicationDetailPage() {
                 </div>
               )}
 
+              {application.status === 'Waitlisted' && (
+                <div>
+                  <h6 className="fw-bold text-warning mb-1">
+                    <i className="fa-solid fa-hourglass-half me-2"></i>
+                    Waitlisted — Seat Allocation Pending
+                  </h6>
+                  <p className="text-muted small mb-2">
+                    This training cohort has reached maximum capacity. You are placed in position{' '}
+                    <strong className="badge bg-warning text-dark fs-6 px-2 py-1">
+                      #{application.waitlistPosition || 1}
+                    </strong>{' '}
+                    on the waitlist. If an enrolled applicant withdraws or an unpaid seat reservation expires, your application will be automatically promoted and an acceptance invoice will be issued.
+                  </p>
+                </div>
+              )}
+
               {(application.status === 'Cancelled' || application.status === 'No Show') && (
                 <div>
                   <h6 className="fw-bold text-danger-egsa mb-1">
@@ -263,40 +517,79 @@ export default function ApplicationDetailPage() {
           </div>
 
           {/* Application Pipeline Timeline */}
-          <div className="egsa-card mb-4 p-4">
-            <h6 className="fw-bold text-dark mb-4">Admissions Pipeline Journey</h6>
-            <div className="ps-2">
-              {PIPELINE_STEPS.map((step, idx) => {
-                const state = getPipelineStepState(step.key, application.status);
-                return (
-                  <div key={step.key}>
-                    <div className="path-node mb-1">
-                      <div className={`dot ${state}`}>
-                        {state === 'completed' ? (
-                          <i className="fa-solid fa-check"></i>
-                        ) : state === 'warning' ? (
-                          <i className="fa-solid fa-exclamation"></i>
-                        ) : (
-                          idx + 1
-                        )}
-                      </div>
-                      <div>
-                        <div className="fw-semibold text-dark">{step.label}</div>
-                        <div className="text-muted small">
-                          {state === 'completed'
-                            ? 'Step fulfilled'
-                            : state === 'current'
-                            ? 'Action in progress'
-                            : 'Upcoming milestone'}
+          {(() => {
+            const pipelineSteps = computeAdmissionsPipeline(application);
+            return (
+              <div className="egsa-card mb-4 p-4">
+                <div className="d-flex justify-content-between align-items-center mb-4">
+                  <div>
+                    <h6 className="fw-bold text-dark mb-1">Admissions Pipeline Journey</h6>
+                    <small className="text-muted">Real-time lifecycle tracking from application submission to cohort enrollment.</small>
+                  </div>
+                  <span className="badge bg-light text-dark border font-monospace">
+                    Ref: {application.referenceNumber || application._id?.slice(-6)?.toUpperCase()}
+                  </span>
+                </div>
+
+                <div className="ps-2">
+                  {pipelineSteps.map((step, idx) => (
+                    <div key={step.key} className="mb-2">
+                      <div className="path-node mb-1">
+                        <div className={`dot ${step.state}`}>
+                          {step.state === 'completed' ? (
+                            <i className="fa-solid fa-check"></i>
+                          ) : step.state === 'warning' ? (
+                            <i className="fa-solid fa-triangle-exclamation"></i>
+                          ) : step.state === 'blocked' ? (
+                            <i className="fa-solid fa-ban"></i>
+                          ) : step.state === 'current' ? (
+                            <i className="fa-solid fa-circle-dot"></i>
+                          ) : (
+                            <i className="fa-solid fa-lock" style={{ fontSize: '0.65rem' }}></i>
+                          )}
+                        </div>
+                        <div className="d-flex flex-column flex-sm-row justify-content-between align-items-start align-items-sm-center flex-grow-1 gap-2">
+                          <div>
+                            <div className="d-flex align-items-center gap-2">
+                              <span className="fw-semibold text-dark">{step.label}</span>
+                              <span
+                                className={`badge ${
+                                  step.state === 'completed'
+                                    ? 'bg-success-subtle text-success border border-success-subtle'
+                                    : step.state === 'current'
+                                    ? 'bg-primary-subtle text-primary-egsa border border-primary-subtle'
+                                    : step.state === 'warning'
+                                    ? 'bg-warning-subtle text-warning-emphasis border border-warning-subtle'
+                                    : step.state === 'blocked'
+                                    ? 'bg-danger-subtle text-danger border border-danger-subtle'
+                                    : 'bg-light text-muted border'
+                                }`}
+                                style={{ fontSize: '0.72rem' }}
+                              >
+                                {step.statusText}
+                              </span>
+                            </div>
+                            <div className="text-muted small mt-0.5">{step.subtitle}</div>
+                          </div>
+
+                          {step.action && (
+                            <Link
+                              to={step.action.to}
+                              className={`btn btn-${step.action.variant || 'primary'} btn-sm px-3 mt-1 mt-sm-0 text-nowrap`}
+                            >
+                              {step.action.icon && <i className={`${step.action.icon} me-1`}></i>}
+                              {step.action.label}
+                            </Link>
+                          )}
                         </div>
                       </div>
+                      {idx < pipelineSteps.length - 1 && <div className="path-connector"></div>}
                     </div>
-                    {idx < PIPELINE_STEPS.length - 1 && <div className="path-connector"></div>}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Readiness Assessment Snapshot (if available) */}
           {readiness && (
@@ -432,6 +725,66 @@ export default function ApplicationDetailPage() {
           )}
         </div>
       </div>
+
+      {/* Cancel Confirmation Modal */}
+      {showCancelModal && (
+        <div className="modal show d-block" tabIndex="-1" style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}>
+          <div className="modal-dialog modal-dialog-centered" style={{ maxWidth: 480 }}>
+            <div className="modal-content border-0 shadow">
+              <div className="modal-header border-bottom">
+                <h5 className="modal-title fw-bold text-danger">
+                  <i className="fa-solid fa-triangle-exclamation me-2"></i> Cancel Application
+                </h5>
+                <button
+                  type="button"
+                  className="btn-close"
+                  onClick={() => setShowCancelModal(false)}
+                  disabled={cancelling}
+                ></button>
+              </div>
+              <div className="modal-body py-4">
+                <p className="text-dark mb-2">
+                  Are you sure you want to cancel your application for <strong>{course.title}</strong>?
+                </p>
+                <div className="alert alert-warning small mb-0">
+                  <i className="fa-solid fa-circle-info me-1"></i>
+                  If a seat reservation was currently held for you, it will be immediately released and granted to the next applicant on the waitlist. Any pending tuition invoice will be cancelled.
+                </div>
+                {cancelError && (
+                  <div className="alert alert-danger small mt-3 mb-0">
+                    {cancelError}
+                  </div>
+                )}
+              </div>
+              <div className="modal-footer border-top">
+                <button
+                  type="button"
+                  className="btn btn-outline-secondary btn-sm"
+                  onClick={() => setShowCancelModal(false)}
+                  disabled={cancelling}
+                >
+                  Keep Application
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger btn-sm"
+                  onClick={handleCancelApplication}
+                  disabled={cancelling}
+                >
+                  {cancelling ? (
+                    <>
+                      <span className="spinner-border spinner-border-sm me-1" role="status"></span>
+                      Cancelling...
+                    </>
+                  ) : (
+                    'Confirm Cancellation'
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

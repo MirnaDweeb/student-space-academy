@@ -28,6 +28,12 @@ const ApplicationSchema = new mongoose.Schema(
     cohort: { type: mongoose.Schema.Types.ObjectId, ref: 'Cohort' },
     readinessAttempt: { type: mongoose.Schema.Types.ObjectId, ref: 'ReadinessAttempt' },
     status: { type: String, enum: APPLICATION_STATUSES, default: 'Draft' },
+    eligibilityStatus: {
+      type: String,
+      enum: ['Not Started', 'In Progress', 'Eligible', 'Not Eligible'],
+      default: 'Not Started',
+    },
+    enrollment: { type: mongoose.Schema.Types.ObjectId, ref: 'Enrollment' },
     selectedPackage: {
       type: String,
       enum: ['WITHOUT_TRANSPORTATION', 'WITH_TRANSPORTATION'],
@@ -43,9 +49,14 @@ const ApplicationSchema = new mongoose.Schema(
     ],
     fitResultSnapshot: { type: mongoose.Schema.Types.Mixed },
     submittedAt: { type: Date },
+    waitlistPosition: { type: Number },
   },
   { timestamps: true }
 );
+
+ApplicationSchema.index({ student: 1, cohort: 1 });
+ApplicationSchema.index({ cohort: 1, status: 1 });
+ApplicationSchema.index({ cohort: 1, waitlistPosition: 1 });
 
 ApplicationSchema.pre('save', function generateReference(next) {
   if (!this.referenceNumber) {

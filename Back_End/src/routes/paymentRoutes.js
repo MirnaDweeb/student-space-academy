@@ -12,6 +12,7 @@ router.get('/invoices/:id', protect, ctrl.getInvoiceDetails);
 
 // Student: Calculate authoritative package pricing
 router.post('/calculate', protect, ctrl.calculatePrice);
+router.get('/calculate', protect, ctrl.calculatePrice);
 
 // Student: Prepare / Update invoice for accepted application
 router.post('/prepare', protect, ctrl.prepareInvoice);
@@ -22,6 +23,12 @@ router.post('/:invoiceId/initiate', protect, ctrl.initiatePayment);
 
 // Student: Verify gateway payment and finalize enrollment
 router.post('/verify', protect, ctrl.verifyPayment);
+
+// Gateway Webhook: Cryptographically verified Stripe webhook (unprotected, called by Stripe)
+router.post('/webhook', ctrl.handleStripeWebhook);
+
+// Student: Query session payment status (e.g. after return from Stripe checkout)
+router.get('/session-status/:sessionId', protect, ctrl.getPaymentSessionStatus);
 
 // Backward-compatible instant pay endpoint
 router.post('/:invoiceId/pay', protect, validate(payInvoiceValidator), ctrl.payInvoice);

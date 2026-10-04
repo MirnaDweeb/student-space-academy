@@ -15,11 +15,11 @@ const UserSchema = new mongoose.Schema(
       match: [/^\d{14}$/, 'National ID must be exactly 14 digits.'],
     },
     role: { type: String, enum: ['student', 'admin', 'instructor'], default: 'student' },
-    isEmailVerified: { type: Boolean, default: false },
+    isEmailVerified: { type: Boolean, default: true },
     accountStatus: {
       type: String,
       enum: ['unverified', 'active', 'suspended', 'disabled'],
-      default: 'unverified',
+      default: 'active',
     },
     emailVerificationTokenHash: { type: String, select: false },
     emailVerificationToken: { type: String, select: false }, // backward compatibility

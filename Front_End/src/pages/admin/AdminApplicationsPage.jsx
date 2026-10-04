@@ -65,15 +65,46 @@ export default function AdminApplicationsPage() {
     }
   };
 
+  const [promotingId, setPromotingId] = useState(null);
+
+  const handlePromote = async (app) => {
+    setPromotingId(app._id);
+    setError('');
+    setActionSuccess('');
+    try {
+      await adminService.promoteWaitlist(app._id);
+      setActionSuccess(`Application for ${app.student?.fullName || 'student'} promoted from waitlist to Accepted. 72h invoice issued.`);
+      load();
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to promote application.');
+    } finally {
+      setPromotingId(null);
+    }
+  };
+
+  const handleMoveToReview = async (app) => {
+    setError('');
+    setActionSuccess('');
+    try {
+      await adminService.reviewApplication(app._id);
+      setActionSuccess(`Application for ${app.student?.fullName || 'student'} placed Under Review.`);
+      load();
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to move application to Under Review.');
+    }
+  };
+
   const filteredApplications = applications.filter((app) => {
     if (activeTab === 'all') return true;
     if (activeTab === 'under_review') {
       return (
         app.status === 'Under Review' ||
         app.status === 'Submitted' ||
-        app.status === 'Manual Review' ||
-        app.status === 'Waitlisted'
+        app.status === 'Manual Review'
       );
+    }
+    if (activeTab === 'waitlisted') {
+      return app.status === 'Waitlisted';
     }
     if (activeTab === 'accepted') {
       return app.status === 'Accepted' || app.status === 'Eligible - Payment Pending';
@@ -90,6 +121,7 @@ export default function AdminApplicationsPage() {
   const underReviewCount = applications.filter(
     (a) => a.status === 'Under Review' || a.status === 'Submitted' || a.status === 'Manual Review'
   ).length;
+  const waitlistCount = applications.filter((a) => a.status === 'Waitlisted').length;
   const acceptedCount = applications.filter(
     (a) => a.status === 'Accepted' || a.status === 'Eligible - Payment Pending'
   ).length;
@@ -108,34 +140,12 @@ export default function AdminApplicationsPage() {
           { label: 'Admin Management', to: '/admin/applications' },
           { label: 'Applications' },
         ]}
+        actions={
+          <button className="btn btn-outline-secondary btn-sm" onClick={load} title="Refresh records">
+            <i className="fa-solid fa-arrows-rotate me-1"></i> Refresh Applications
+          </button>
+        }
       />
-
-      {/* Admin Section Tabs Navigation */}
-      <div className="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-4 pb-2 border-bottom">
-        <ul className="nav nav-pills">
-          <li className="nav-item">
-            <Link to="/admin/applications" className="nav-link active bg-primary-egsa text-white">
-              <i className="fa-solid fa-file-signature me-2"></i>
-              Admissions Applications
-            </Link>
-          </li>
-          <li className="nav-item">
-            <Link to="/admin/certificates" className="nav-link text-muted">
-              <i className="fa-solid fa-award me-2"></i>
-              Certificate Queue
-            </Link>
-          </li>
-          <li className="nav-item">
-            <Link to="/admin/payments" className="nav-link text-muted">
-              <i className="fa-solid fa-credit-card me-2"></i>
-              Payments & Invoices
-            </Link>
-          </li>
-        </ul>
-        <button className="btn btn-outline-secondary btn-sm" onClick={load} title="Refresh records">
-          <i className="fa-solid fa-arrows-rotate me-1"></i> Refresh Applications
-        </button>
-      </div>
 
       {/* KPI Stats */}
       <div className="row g-3 mb-4">
@@ -192,6 +202,12 @@ export default function AdminApplicationsPage() {
           onClick={() => setActiveTab('under_review')}
         >
           Under Review ({underReviewCount})
+        </button>
+        <button
+          className={`btn btn-sm rounded-pill px-3 ${activeTab === 'waitlisted' ? 'btn-primary' : 'btn-outline-secondary'}`}
+          onClick={() => setActiveTab('waitlisted')}
+        >
+          Waitlisted ({waitlistCount})
         </button>
         <button
           className={`btn btn-sm rounded-pill px-3 ${activeTab === 'accepted' ? 'btn-primary' : 'btn-outline-secondary'}`}
@@ -311,6 +327,15 @@ export default function AdminApplicationsPage() {
                         <div className="btn-group btn-group-sm">
                           {isReviewable && (
                             <>
+                              {app.status === 'Submitted' && (
+                                <button
+                                  className="btn btn-outline-primary"
+                                  onClick={() => handleMoveToReview(app)}
+                                  title="Mark Application Under Review"
+                                >
+                                  <i className="fa-solid fa-clock-rotate-left me-1"></i> Review
+                                </button>
+                              )}
                               <button
                                 className="btn btn-outline-success"
                                 onClick={() => setSelectedAppForAccept(app)}
@@ -326,6 +351,26 @@ export default function AdminApplicationsPage() {
                                 <i className="fa-solid fa-xmark me-1"></i> Reject
                               </button>
                             </>
+                          )}
+                          {app.status === 'Waitlisted' && (
+                            <button
+                              className="btn btn-warning btn-sm text-dark fw-medium"
+                              onClick={() => handlePromote(app)}
+                              disabled={promotingId === app._id}
+                              title="Manually promote waitlisted applicant and issue 72h invoice"
+                            >
+                              {promotingId === app._id ? (
+                                <>
+                                  <span className="spinner-border spinner-border-sm me-1" role="status"></span>
+                                  Promoting...
+                                </>
+                              ) : (
+                                <>
+                                  <i className="fa-solid fa-arrow-up-from-bracket me-1"></i>
+                                  Promote to Accepted
+                                </>
+                              )}
+                            </button>
                           )}
                           {app.status === 'Accepted' && (
                             <span className="badge bg-light text-primary border p-2">

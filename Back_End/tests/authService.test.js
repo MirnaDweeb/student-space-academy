@@ -107,8 +107,8 @@ describe('EGSA Space Academy — Auth & Session Security Suite', () => {
           email: 'tariq.nour@example.com', // normalized lowercase
           nationalId: '29801010123456',
           role: 'student',
-          accountStatus: 'unverified',
-          isEmailVerified: false,
+          accountStatus: 'active',
+          isEmailVerified: true,
         })
       );
       expect(StudentProfile.create).toHaveBeenCalledWith(
@@ -119,11 +119,10 @@ describe('EGSA Space Academy — Auth & Session Security Suite', () => {
           department: 'Aerospace',
         })
       );
-      expect(sendVerificationEmail).toHaveBeenCalled();
       expect(res.json).toHaveBeenCalledWith(
         expect.objectContaining({
           success: true,
-          data: expect.objectContaining({ unverified: true }),
+          message: expect.stringMatching(/Registration successful/i),
         })
       );
     });
@@ -313,23 +312,29 @@ describe('EGSA Space Academy — Auth & Session Security Suite', () => {
   });
 
   describe('Login & Authentication Session', () => {
-    test('blocks login if student account is unverified with EMAIL_NOT_VERIFIED 403', async () => {
+    test('allows login if student account had legacy unverified status, activating it seamlessly', async () => {
       const mockUser = {
         _id: 'unverified-cadet',
+        fullName: 'Unverified Cadet',
         email: 'unverified@egsa-academy.example',
         role: 'student',
         isEmailVerified: false,
         accountStatus: 'unverified',
         isActive: false,
+        refreshTokens: [],
         comparePassword: jest.fn().mockResolvedValue(true),
+        save: jest.fn().mockResolvedValue(true),
       };
       User.findOne.mockReturnValue({ select: jest.fn().mockResolvedValue(mockUser) });
+      StudentProfile.findOne.mockResolvedValue({ isProfileComplete: true });
 
       const req = {
         body: {
           email: 'unverified@egsa-academy.example',
           password: 'Password123!',
         },
+        headers: {},
+        ip: '127.0.0.1',
       };
       const res = mockRes();
       const next = jest.fn();
@@ -337,12 +342,24 @@ describe('EGSA Space Academy — Auth & Session Security Suite', () => {
       await login(req, res, next);
 
       expect(next).not.toHaveBeenCalled();
-      expect(res.status).toHaveBeenCalledWith(403);
+      expect(mockUser.isEmailVerified).toBe(true);
+      expect(mockUser.accountStatus).toBe('active');
+      expect(mockUser.isActive).toBe(true);
+      expect(mockUser.save).toHaveBeenCalled();
       expect(res.json).toHaveBeenCalledWith(
         expect.objectContaining({
-          success: false,
-          code: 'EMAIL_NOT_VERIFIED',
-          data: expect.objectContaining({ unverified: true }),
+          success: true,
+          data: expect.objectContaining({
+            token: expect.any(String),
+            accessToken: expect.any(String),
+            refreshToken: expect.any(String),
+            user: expect.objectContaining({
+              id: 'unverified-cadet',
+              email: 'unverified@egsa-academy.example',
+              accountStatus: 'active',
+              isEmailVerified: true,
+            }),
+          }),
         })
       );
     });

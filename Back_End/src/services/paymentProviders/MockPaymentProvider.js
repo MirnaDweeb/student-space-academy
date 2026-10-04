@@ -30,17 +30,17 @@ class MockPaymentProvider extends PaymentProviderInterface {
   }
 
   async verifyPayment({ transactionId, payload = {} }) {
-    // If client requested a simulated failure or payload indicates failure
-    if (payload.simulateFailure === true || payload.status === 'FAILED') {
+    // If client requested a simulated failure or payload indicates failure / cancellation
+    if (payload.simulateFailure === true || payload.status === 'FAILED' || payload.status === 'CANCELLED') {
       return {
         isVerified: true,
-        status: 'FAILED',
-        failureReason: payload.failureReason || 'Simulated card decline: Insufficient test funds.',
+        status: payload.status === 'CANCELLED' ? 'CANCELLED' : 'FAILED',
+        failureReason: payload.failureReason || 'Simulated payment cancellation or failure.',
         paidAmount: 0,
         currency: 'EGP',
-        providerReference: payload.providerReference || `MOCK_FAIL_${Date.now()}`,
+        providerReference: payload.providerReference || `MOCK_${payload.status || 'FAIL'}_${Date.now()}`,
         isMock: true,
-        rawResponse: { simulated: true, outcome: 'REJECTED' },
+        rawResponse: { simulated: true, outcome: payload.status || 'REJECTED' },
       };
     }
 

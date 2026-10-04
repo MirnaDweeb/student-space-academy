@@ -15,10 +15,10 @@ router.post('/disputes', ctrl.submitDispute);
 router.get('/disputes/my', ctrl.getMyDisputes);
 
 // Admin & Instructor routes
-router.post('/sessions/:id/qr', authorize('admin'), ctrl.generateQR);
-router.get('/sessions/:id/roster', authorize('admin'), ctrl.getSessionRoster);
-router.put('/records/:id', authorize('admin'), ctrl.correctRecord);
-router.get('/disputes', authorize('admin'), ctrl.listDisputes);
-router.put('/disputes/:id', authorize('admin'), ctrl.reviewDispute);
+router.post('/sessions/:id/qr', authorize('admin', 'superadmin'), ctrl.generateQR);
+router.get('/sessions/:id/roster', authorize('admin', 'superadmin'), ctrl.getSessionRoster);
+router.put('/records/:id', authorize('admin', 'superadmin'), ctrl.correctRecord);
+router.get('/disputes', authorize('admin', 'superadmin'), ctrl.listDisputes);
+router.put('/disputes/:id', authorize('admin', 'superadmin'), ctrl.reviewDispute);
 
 module.exports = router;

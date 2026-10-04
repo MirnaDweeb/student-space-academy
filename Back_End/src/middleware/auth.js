@@ -26,20 +26,11 @@ async function protect(req, res, next) {
     }
 
     // Account state enforcement
-    if (user.accountStatus === 'suspended' || user.accountStatus === 'disabled' || !user.isActive) {
+    if (user.accountStatus === 'suspended' || user.accountStatus === 'disabled') {
       return res.status(403).json({
         success: false,
         code: 'ACCOUNT_DEACTIVATED',
         message: 'Account is deactivated or suspended. Please contact EGSA administration.',
-      });
-    }
-
-    // Email verification check for protected resources
-    if (user.accountStatus === 'unverified' || (!user.isEmailVerified && user.role === 'student')) {
-      return res.status(403).json({
-        success: false,
-        code: 'EMAIL_NOT_VERIFIED',
-        message: 'Email address has not been verified yet. Please verify your email before accessing the portal.',
       });
     }
 

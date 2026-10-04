@@ -22,7 +22,18 @@ const MediaSchema = new mongoose.Schema(
     student: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     course: { type: mongoose.Schema.Types.ObjectId, ref: 'Course', required: true },
     cohort: { type: mongoose.Schema.Types.ObjectId, ref: 'Cohort', required: true },
-    session: { type: mongoose.Schema.Types.ObjectId, ref: 'TrainingSession', required: true },
+    session: { type: mongoose.Schema.Types.ObjectId, ref: 'TrainingSession' }, // Optional: can be general project/activity
+    enrollment: { type: mongoose.Schema.Types.ObjectId, ref: 'Enrollment' },
+    category: {
+      type: String,
+      enum: ['Project', 'Activity', 'Student Photo', 'Workshop', 'Other'],
+      default: 'Project',
+    },
+    uploadedByType: {
+      type: String,
+      enum: ['Student', 'Instructor', 'Admin'],
+      default: 'Student',
+    },
 
     title: { type: String, required: true, trim: true, maxlength: 150 },
     caption: { type: String, trim: true, maxlength: 300 },

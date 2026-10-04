@@ -21,38 +21,40 @@ async function validateStudentSessionAccess(studentId, courseId, cohortId, sessi
     throw new AppError('You are not actively enrolled in this course and cohort.', 403);
   }
 
-  const session = await TrainingSession.findOne({
-    _id: sessionId,
-    course: courseId,
-    cohort: cohortId,
-  });
-
-  if (!session) {
-    throw new AppError('The selected training session does not belong to your enrolled cohort.', 400);
+  let session = null;
+  if (sessionId) {
+    session = await TrainingSession.findOne({
+      _id: sessionId,
+      course: courseId,
+      cohort: cohortId,
+    });
+    if (!session) {
+      throw new AppError('The selected training session does not belong to your enrolled cohort.', 400);
+    }
   }
 
   return { enrollment, session };
 }
 
 /**
- * Creates a media submission for an enrolled training session.
+ * Creates a media submission for an enrolled training session or project.
  */
 async function createMediaSubmission(studentId, file, data) {
   if (!file) {
     throw new AppError('Image file is required for media submission.', 400);
   }
 
-  const { courseId, cohortId, sessionId, title, caption, description, consentConfirmed, submitImmediately } = data;
+  const { courseId, cohortId, sessionId, category, title, caption, description, consentConfirmed, submitImmediately } = data;
 
-  if (!courseId || !cohortId || !sessionId) {
-    throw new AppError('Course, cohort, and training session associations are mandatory.', 400);
+  if (!courseId || !cohortId) {
+    throw new AppError('Course and cohort associations are mandatory for media submission.', 400);
   }
 
   if (!title || !title.trim()) {
     throw new AppError('Media title is required.', 400);
   }
 
-  await validateStudentSessionAccess(studentId, courseId, cohortId, sessionId);
+  const { enrollment, session } = await validateStudentSessionAccess(studentId, courseId, cohortId, sessionId);
 
   const fileUrl = `/uploads/media/${file.filename}`;
   const shouldSubmit = submitImmediately === 'true' || submitImmediately === true;
@@ -74,7 +76,10 @@ async function createMediaSubmission(studentId, file, data) {
     student: studentId,
     course: courseId,
     cohort: cohortId,
-    session: sessionId,
+    session: session ? session._id : undefined,
+    enrollment: enrollment._id,
+    category: category || 'Project',
+    uploadedByType: 'Student',
     title: title.trim(),
     caption: caption ? caption.trim() : '',
     description: description ? description.trim() : '',
@@ -290,6 +295,7 @@ async function listAdminMedia(query = {}) {
   const items = await Media.find(filter)
     .populate('student', 'fullName email')
     .populate('course', 'title code level')
+    .populate('cohort', 'name startDate endDate')
     .populate('session', 'title sessionNumber date location')
     .sort({ submittedAt: -1, createdAt: -1 });
 

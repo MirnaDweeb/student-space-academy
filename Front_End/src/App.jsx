@@ -33,9 +33,15 @@ import MediaPage from './pages/student/MediaPage.jsx';
 import CertificatePage from './pages/student/CertificatePage.jsx';
 import NotificationsPage from './pages/student/NotificationsPage.jsx';
 import ProfilePage from './pages/student/ProfilePage.jsx';
+import AdminLayout from './layouts/AdminLayout.jsx';
+import AdminDashboardPage from './pages/admin/AdminDashboardPage.jsx';
 import AdminApplicationsPage from './pages/admin/AdminApplicationsPage.jsx';
-import AdminCertificatesPage from './pages/admin/AdminCertificatesPage.jsx';
+import AdminCohortsPage from './pages/admin/AdminCohortsPage.jsx';
+import AdminAttendancePage from './pages/admin/AdminAttendancePage.jsx';
+import AdminAssessmentsPage from './pages/admin/AdminAssessmentsPage.jsx';
+import AdminMediaPage from './pages/admin/AdminMediaPage.jsx';
 import AdminPaymentsPage from './pages/admin/AdminPaymentsPage.jsx';
+import AdminCertificatesPage from './pages/admin/AdminCertificatesPage.jsx';
 
 export default function App() {
   return (
@@ -89,6 +95,7 @@ export default function App() {
 
           {/* 8. Evaluation */}
           <Route path="evaluation" element={<EvaluationPage />} />
+          <Route path="feedback" element={<EvaluationPage />} />
 
           {/* 9. Payments */}
           <Route path="payments" element={<PaymentsPage />} />
@@ -113,10 +120,18 @@ export default function App() {
 
       {/* Protected Admin Routes */}
       <Route path="/admin" element={<ProtectedRoute allowedRoles={['admin']} />}>
-        <Route path="applications" element={<AdminApplicationsPage />} />
-        <Route path="certificates" element={<AdminCertificatesPage />} />
-        <Route path="payments" element={<AdminPaymentsPage />} />
-        <Route index element={<Navigate to="/admin/applications" replace />} />
+        <Route element={<AdminLayout />}>
+          <Route index element={<Navigate to="/admin/dashboard" replace />} />
+          <Route path="dashboard" element={<AdminDashboardPage />} />
+          <Route path="applications" element={<AdminApplicationsPage />} />
+          <Route path="cohorts" element={<AdminCohortsPage />} />
+          <Route path="attendance" element={<AdminAttendancePage />} />
+          <Route path="assessments" element={<AdminAssessmentsPage />} />
+          <Route path="media" element={<AdminMediaPage />} />
+          <Route path="payments" element={<AdminPaymentsPage />} />
+          <Route path="certificates" element={<AdminCertificatesPage />} />
+          <Route path="*" element={<Navigate to="/admin/dashboard" replace />} />
+        </Route>
       </Route>
 
       {/* Global Fallback */}

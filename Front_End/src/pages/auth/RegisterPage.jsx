@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext.jsx';
 import { authTranslations } from '../../utils/authTranslations.js';
+import BrandLogo from '../../components/BrandLogo.jsx';
 
 const initialForm = {
   fullName: '',
@@ -19,7 +20,7 @@ const initialForm = {
 };
 
 export default function RegisterPage() {
-  const { register, resendVerification, language = 'en', toggleLanguage = () => {}, isRTL = false } = useAuth();
+  const { register, resendVerification, language = 'en', toggleLanguage = () => { }, isRTL = false } = useAuth();
   const t = authTranslations[language] || authTranslations.en;
   const navigate = useNavigate();
 
@@ -34,6 +35,7 @@ export default function RegisterPage() {
   const [resendCooldown, setResendCooldown] = useState(0);
   const [resendMsg, setResendMsg] = useState('');
   const [resendLoading, setResendLoading] = useState(false);
+  const [devLink, setDevLink] = useState(null);
 
   const update = (field) => (e) => {
     const value = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
@@ -91,6 +93,18 @@ export default function RegisterPage() {
     e.preventDefault();
     setError('');
 
+    const trimmedEmail = (form.email || '').trim();
+    if (!trimmedEmail) {
+      setError(language === 'ar' ? 'البريد الإلكتروني مطلوب.' : 'Email address is required.');
+      return;
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(trimmedEmail)) {
+      setError(language === 'ar' ? 'صيغة البريد الإلكتروني غير صحيحة.' : 'Please enter a valid email address.');
+      return;
+    }
+
     if (!isNationalIdValid) {
       setError(language === 'ar' ? 'يجب أن يتكون الرقم القومي من ١٤ رقماً.' : 'National ID must be exactly 14 digits.');
       return;
@@ -106,8 +120,28 @@ export default function RegisterPage() {
 
     setLoading(true);
     try {
-      const res = await register(form);
-      setRegisteredEmail(res?.data?.email || form.email);
+      const sanitizedForm = {
+        ...form,
+        fullName: (form.fullName || '').trim(),
+        email: trimmedEmail,
+        phone: (form.phone || '').trim(),
+        nationalId: (form.nationalId || '').trim(),
+        university: (form.university || '').trim(),
+        faculty: (form.faculty || '').trim(),
+        department: (form.department || '').trim(),
+      };
+      const res = await register(sanitizedForm);
+      const successMessage = res?.message || (language === 'ar'
+        ? 'تم إنشاء الحساب بنجاح. يرجى تسجيل الدخول باستخدام البريد الإلكتروني وكلمة المرور.'
+        : 'Registration successful. Please log in using your registered email and password.');
+
+      navigate('/login', {
+        state: {
+          message: successMessage,
+          email: trimmedEmail,
+        },
+        replace: true,
+      });
     } catch (err) {
       setError(err.response?.data?.message || (language === 'ar' ? 'فشل إنشاء الحساب. يرجى مراجعة البيانات.' : 'Registration failed. Please check your data.'));
     } finally {
@@ -120,8 +154,12 @@ export default function RegisterPage() {
     setResendLoading(true);
     setResendMsg('');
     try {
-      const res = await resendVerification(form.email);
+      const targetEmail = (form.email || '').trim();
+      const res = await resendVerification(targetEmail);
       setResendMsg(res?.message || t.resendSuccess);
+      if (res?.data?.devVerificationUrl) {
+        setDevLink(res.data.devVerificationUrl);
+      }
       setResendCooldown(60);
       const timer = setInterval(() => {
         setResendCooldown((prev) => {
@@ -171,17 +209,38 @@ export default function RegisterPage() {
                 <i className="fa-solid fa-envelope-circle-check fa-2x text-secondary-egsa"></i>
               </div>
 
-              <span className="badge bg-secondary-subtle text-secondary-egsa px-3 py-1 rounded-pill mb-2 fw-semibold">
-                {t.regSuccessTitle}
+              <span className={`badge ${emailSentStatus ? 'bg-secondary-subtle text-secondary-egsa' : 'bg-warning-subtle text-warning-emphasis'} px-3 py-1 rounded-pill mb-2 fw-semibold`}>
+                {emailSentStatus ? t.regSuccessTitle : (language === 'ar' ? 'تم إنشاء الحساب' : 'Account Created')}
               </span>
-              <h2 className="fw-bold mb-2 text-dark">{t.regSuccessHeading}</h2>
-              <p className="text-muted mb-4">{t.regSuccessDesc}</p>
+              <h2 className="fw-bold mb-2 text-dark">
+                {emailSentStatus ? t.regSuccessHeading : (language === 'ar' ? 'تأكيد التسجيل' : 'Account Registered')}
+              </h2>
+              <p className="text-muted mb-4">
+                {emailSentStatus ? t.regSuccessDesc : (t.regSuccessEmailFailed || (language === 'ar' ? 'تم إنشاء الحساب بنجاح، ولكن تعذر إرسال بريد التأكيد حالياً. يرجى المحاولة لاحقاً.' : 'Registration successful, but the confirmation email could not be sent. Please try again later.'))}
+              </p>
 
               <div className="p-3 bg-surface-subtle border rounded-3 font-monospace fw-bold text-primary-egsa mb-4 fs-5">
                 {registeredEmail}
               </div>
 
-              <p className="small text-muted mb-4">{t.regSuccessNotice}</p>
+              <p className="small text-muted mb-4">
+                {emailSentStatus ? t.regSuccessNotice : (t.regSuccessNoticeFailed || (language === 'ar' ? 'تم حفظ حساب المتدرب في قاعدة البيانات، ولكن تعذر إرسال بريد التأكيد لعدم توفر خادم البريد حالياً.' : 'Your cadet account has been saved in our database. However, our email service is currently unavailable or SMTP credentials are not configured.'))}
+              </p>
+
+              {devLink && (
+                <div className="alert alert-warning py-3 px-3 small mb-4 text-start">
+                  <div className="fw-bold mb-1 text-dark">
+                    <i className="fa-solid fa-code me-1 text-warning-emphasis"></i> Development Environment Notice:
+                  </div>
+                  <div className="text-muted mb-2">
+                    SMTP is configured with placeholder values in .env. To activate this account in development mode, click below:
+                  </div>
+                  <a href={devLink} className="btn btn-sm btn-primary w-100 fw-bold">
+                    <i className="fa-solid fa-arrow-up-right-from-square me-1"></i>
+                    Verify Email Address Now (Dev Mode)
+                  </a>
+                </div>
+              )}
 
               <div className="d-grid gap-2 mb-4">
                 <Link to="/login" className="btn btn-primary py-2 fw-semibold">
@@ -228,7 +287,7 @@ export default function RegisterPage() {
             <div className="col-lg-5 auth-hero-banner d-none d-lg-flex">
               <div>
                 <div className="d-inline-flex align-items-center gap-2 px-3 py-1 rounded-pill mb-4" style={{ background: 'rgba(212, 184, 124, 0.15)', border: '1px solid rgba(212, 184, 124, 0.3)', color: '#D4B87C', fontSize: '0.75rem', fontWeight: 700, letterSpacing: '0.08em' }}>
-                  <i className="fa-solid fa-satellite"></i>
+                  <BrandLogo height={22} className="me-1" />
                   <span>{t.brandTag}</span>
                 </div>
 

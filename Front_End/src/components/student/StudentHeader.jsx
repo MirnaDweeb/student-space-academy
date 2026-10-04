@@ -104,7 +104,7 @@ export default function StudentHeader({
 
       {/* Right Shortcuts: Search, Notifications, Profile */}
       <div className="d-flex align-items-center gap-2 gap-sm-3">
-        {/* Mission / Academic cycle badge */}
+        {/* Academic cycle badge */}
         <div className="d-none d-xl-flex align-items-center gap-2 telemetry-chip px-2 py-1">
           <span
             style={{
@@ -115,7 +115,7 @@ export default function StudentHeader({
               display: 'inline-block',
             }}
           />
-          <span>MISSION 2026/27 · ACTIVE</span>
+          <span>ACADEMIC CYCLE 2026/27 · ACTIVE</span>
         </div>
 
         {/* Quick link to Explore Programs */}
@@ -163,7 +163,7 @@ export default function StudentHeader({
             {getInitials(user?.fullName)}
           </div>
           <span className="small fw-semibold text-dark d-none d-sm-inline">
-            {user?.fullName?.split(' ')[0] || 'Cadet'}
+            {user?.fullName?.split(' ')[0] || 'Student'}
           </span>
           <i className="fa-solid fa-chevron-down small text-muted d-none d-sm-inline" style={{ fontSize: '0.7rem' }}></i>
         </Link>

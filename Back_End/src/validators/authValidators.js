@@ -11,7 +11,7 @@ const registerValidator = [
     .trim()
     .isEmail()
     .withMessage('A valid working email address is required.')
-    .normalizeEmail(),
+    .normalizeEmail({ gmail_remove_dots: false }),
   body('password')
     .isLength({ min: 6 })
     .withMessage('Password must be at least 6 characters long.'),
@@ -57,7 +57,7 @@ const loginValidator = [
     .trim()
     .isEmail()
     .withMessage('A valid email address is required.')
-    .normalizeEmail(),
+    .normalizeEmail({ gmail_remove_dots: false }),
   body('password')
     .notEmpty()
     .withMessage('Password is required.'),

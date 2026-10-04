@@ -39,7 +39,7 @@ async function runLiveHttpVerification() {
   });
 
   const loginRes = await request({
-    hostname: 'localhost',
+    hostname: '127.0.0.1',
     port: 5000,
     path: '/api/auth/login',
     method: 'POST',
@@ -65,7 +65,7 @@ async function runLiveHttpVerification() {
   // Step 2: Fetch Student Assessments via GET /api/assessments/my
   console.log('2. Fetching student assessments (scoped to enrolled cohorts)...');
   const listRes = await request({
-    hostname: 'localhost',
+    hostname: '127.0.0.1',
     port: 5000,
     path: '/api/assessments/my',
     method: 'GET',
@@ -99,7 +99,7 @@ async function runLiveHttpVerification() {
   console.log(`\n3. Viewing details of Assessment: "${targetAssessment.title}" (ID: ${targetAssessment._id})...`);
 
   const detailRes = await request({
-    hostname: 'localhost',
+    hostname: '127.0.0.1',
     port: 5000,
     path: `/api/assessments/${targetAssessment._id}`,
     method: 'GET',
@@ -125,7 +125,7 @@ async function runLiveHttpVerification() {
   console.log('\n4. Verifying IDOR Protection against unauthorized cohort assessment...');
   const fakeId = '650000000000000000000099';
   const idorRes = await request({
-    hostname: 'localhost',
+    hostname: '127.0.0.1',
     port: 5000,
     path: `/api/assessments/${fakeId}`,
     method: 'GET',
@@ -153,7 +153,7 @@ async function runLiveHttpVerification() {
   multipartBody += `--${boundary}--\r\n`;
 
   const submitRes = await request({
-    hostname: 'localhost',
+    hostname: '127.0.0.1',
     port: 5000,
     path: `/api/assessments/${submittable._id}/submit`,
     method: 'POST',
@@ -181,7 +181,7 @@ async function runLiveHttpVerification() {
     const evaluatedItem = sections.evaluated[0];
     console.log(`\n6. Verifying published evaluation details for: "${evaluatedItem.title}"...`);
     const evalRes = await request({
-      hostname: 'localhost',
+      hostname: '127.0.0.1',
       port: 5000,
       path: `/api/assessments/${evaluatedItem._id}`,
       method: 'GET',

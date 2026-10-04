@@ -1,15 +1,16 @@
 import React, { useEffect, useState } from 'react';
-import { useNavigate, useSearchParams, Link } from 'react-router-dom';
+import { useNavigate, useSearchParams, useLocation, Link } from 'react-router-dom';
 import { readinessService } from '../../services/cycleServices';
 import { LoadingState, ErrorState, PageHeader } from '../../components/StateComponents.jsx';
 
 export default function ReadinessStartPage() {
   const [params] = useSearchParams();
+  const location = useLocation();
   const [error, setError] = useState('');
   const navigate = useNavigate();
 
   useEffect(() => {
-    const courseId = params.get('courseId');
+    const courseId = params.get('courseId') || location.state?.courseId;
     if (!courseId) {
       setError('Missing course parameter in request.');
       return;

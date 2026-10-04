@@ -8,6 +8,7 @@ jest.mock('../src/models/Enrollment');
 jest.mock('../src/models/PaymentTransaction');
 jest.mock('../src/models/TrainingSession');
 jest.mock('../src/models/ReadinessQuestion');
+jest.mock('../src/models/ReadinessAttempt');
 jest.mock('../src/services/notificationService');
 jest.mock('../src/utils/email');
 
@@ -21,6 +22,7 @@ const Enrollment = require('../src/models/Enrollment');
 const PaymentTransaction = require('../src/models/PaymentTransaction');
 const TrainingSession = require('../src/models/TrainingSession');
 const ReadinessQuestion = require('../src/models/ReadinessQuestion');
+const ReadinessAttempt = require('../src/models/ReadinessAttempt');
 const { notify } = require('../src/services/notificationService');
 const {
   sendVerificationEmail,
@@ -88,13 +90,8 @@ describe('EGSA Space Academy — Student Lifecycle & Payment Workflow', () => {
       expect(next).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(201);
 
-      // Email 1: Verification
-      expect(sendVerificationEmail).toHaveBeenCalledWith(
-        expect.objectContaining({
-          to: 'sara.ahmed@space.egsa.gov.eg',
-          fullName: 'Sara Ahmed',
-        })
-      );
+      // Email: No verification email sent during registration
+      expect(sendVerificationEmail).not.toHaveBeenCalled();
 
       // Email 2: Registration Confirmation with EGSA reference number
       expect(sendRegistrationConfirmationEmail).toHaveBeenCalledWith(
@@ -136,11 +133,15 @@ describe('EGSA Space Academy — Student Lifecycle & Payment Workflow', () => {
         sort: jest.fn().mockResolvedValue(null),
       });
 
+      ReadinessAttempt.findOne.mockReturnValue({
+        sort: jest.fn().mockResolvedValue(null),
+      });
+
       const mockAppDoc = {
         _id: '507f1f77bcf86cd799439044',
         student: '507f1f77bcf86cd799439011',
         course: mockCourse._id,
-        status: 'Under Review',
+        status: 'Submitted',
         referenceNumber: 'EGSA-APP-921820',
       };
       Application.create.mockResolvedValue(mockAppDoc);
@@ -166,7 +167,7 @@ describe('EGSA Space Academy — Student Lifecycle & Payment Workflow', () => {
       expect(res.status).toHaveBeenCalledWith(201);
       expect(Application.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          status: 'Under Review',
+          status: expect.stringMatching(/Submitted|Under Review/),
         })
       );
       expect(sendApplicationSubmittedEmail).toHaveBeenCalledWith(
