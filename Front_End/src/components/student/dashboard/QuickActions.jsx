@@ -93,6 +93,14 @@ export default function QuickActions({
   }
 
   actions.push({
+    id: 'payments',
+    title: 'Course Payments',
+    description: 'Review tuition invoices, receipts, and payment records',
+    icon: 'fa-credit-card',
+    link: '/student/payments',
+  });
+
+  actions.push({
     id: 'certificate',
     title: 'Official Certificates',
     description: 'Request, confirm, and download EGSA credentials',

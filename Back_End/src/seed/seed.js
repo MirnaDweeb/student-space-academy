@@ -294,6 +294,40 @@ async function seed() {
       enrollmentDate: new Date(Date.now() - 12 * 86400000),
     });
 
+    // Seed official settled invoice & transaction for circuit training
+    const circuitInvoice = await Invoice.create({
+      invoiceNumber: 'EGSA-INV-202601',
+      student: demoUser._id,
+      application: circuitApp._id,
+      course: circuitCourse._id,
+      cohort: circuitCohort._id,
+      baseAmount: circuitCourse.price || 2500,
+      coursePriceAtPurchase: circuitCourse.price || 2500,
+      transportationAmount: 0,
+      amount: circuitCourse.price || 2500,
+      remainingAmount: 0,
+      currency: 'EGP',
+      status: 'Paid',
+      issuedAt: new Date(Date.now() - 14 * 86400000),
+      paidAt: new Date(Date.now() - 12 * 86400000),
+      dueDate: new Date(Date.now() - 11 * 86400000),
+      dueAt: new Date(Date.now() - 11 * 86400000),
+    });
+
+    await PaymentTransaction.create({
+      invoice: circuitInvoice._id,
+      student: demoUser._id,
+      amount: circuitInvoice.amount,
+      currency: 'EGP',
+      method: 'Card',
+      transactionId: 'TXN_CIRCUIT_DEMO_01',
+      provider: 'STRIPE',
+      isMock: false,
+      status: 'Paid',
+      paymentDate: new Date(Date.now() - 12 * 86400000),
+      providerReference: 'pi_demo_circuit_paid',
+    });
+
     // Seed real Training Sessions for Circuit Design Program
     sess1 = await TrainingSession.create({
       course: circuitCourse._id,
@@ -479,6 +513,89 @@ async function seed() {
       status: 'Confirmed',
       enrollmentDate: new Date(),
     });
+
+    // Seed official settled invoice & transaction for robotics training
+    const roboticsInvoice = await Invoice.create({
+      invoiceNumber: 'EGSA-INV-202602',
+      student: demoUser._id,
+      application: roboticsApp._id,
+      course: roboticsCourse._id,
+      cohort: roboticsCohort._id,
+      baseAmount: roboticsCourse.price || 3000,
+      coursePriceAtPurchase: roboticsCourse.price || 3000,
+      transportationAmount: 500,
+      packageType: 'WITH_TRANSPORTATION',
+      amount: (roboticsCourse.price || 3000) + 500,
+      remainingAmount: 0,
+      currency: 'EGP',
+      status: 'Paid',
+      issuedAt: new Date(Date.now() - 6 * 86400000),
+      paidAt: new Date(Date.now() - 4 * 86400000),
+      dueDate: new Date(Date.now() + 10 * 86400000),
+      dueAt: new Date(Date.now() + 10 * 86400000),
+    });
+
+    await PaymentTransaction.create({
+      invoice: roboticsInvoice._id,
+      student: demoUser._id,
+      amount: roboticsInvoice.amount,
+      currency: 'EGP',
+      method: 'Card',
+      transactionId: 'TXN_ROBOTICS_DEMO_02',
+      provider: 'STRIPE',
+      isMock: false,
+      status: 'Paid',
+      paymentDate: new Date(Date.now() - 4 * 86400000),
+      providerReference: 'pi_demo_robotics_paid',
+    });
+
+    // Seed 3rd accepted application with an active payable invoice awaiting student payment
+    const measureCourse = await Course.findOne({ title: 'Measurement & Instrumentation Program' }) ||
+      await Course.findOne({ title: 'Team Management Program' });
+
+    if (measureCourse) {
+      const measureCohort = await Cohort.create({
+        course: measureCourse._id,
+        name: 'Cohort 2026-03: Space Instrumentation & Sensors',
+        startDate: new Date(Date.now() + 14 * 86400000),
+        endDate: new Date(Date.now() + 35 * 86400000),
+        capacity: 20,
+        seatsTaken: 12,
+        status: 'Scheduled',
+      });
+
+      const measureApp = await Application.create({
+        student: demoUser._id,
+        course: measureCourse._id,
+        cohort: measureCohort._id,
+        status: 'Accepted',
+        statusHistory: [
+          { status: 'Submitted', note: 'Application submitted.' },
+          { status: 'Accepted', note: 'Application accepted by Admissions Committee. Tuition payment required.' },
+        ],
+        submittedAt: new Date(Date.now() - 2 * 86400000),
+      });
+
+      const dueDate = new Date(measureCohort.startDate.getTime() - 72 * 3600000);
+      await Invoice.create({
+        invoiceNumber: 'EGSA-INV-202603',
+        student: demoUser._id,
+        application: measureApp._id,
+        course: measureCourse._id,
+        cohort: measureCohort._id,
+        baseAmount: measureCourse.price || 3500,
+        coursePriceAtPurchase: measureCourse.price || 3500,
+        transportationAmount: 0,
+        amount: measureCourse.price || 3500,
+        remainingAmount: measureCourse.price || 3500,
+        currency: measureCourse.currency || 'EGP',
+        packageType: 'WITHOUT_TRANSPORTATION',
+        status: 'Invoice Issued',
+        issuedAt: new Date(),
+        dueDate,
+        dueAt: dueDate,
+      });
+    }
 
     // Seed 5 upcoming scheduled sessions for Embedded Robotics Program
     for (let day = 1; day <= 5; day++) {
