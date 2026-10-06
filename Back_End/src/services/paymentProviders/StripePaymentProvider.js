@@ -55,6 +55,7 @@ class StripePaymentProvider extends PaymentProviderInterface {
       mode: 'payment',
       customer_email: student?.email || undefined,
       client_reference_id: invoice._id.toString(),
+      expires_at: Math.floor(Date.now() / 1000) + 1800, // 30-minute checkout session expiration
       metadata: {
         invoiceId: invoice._id.toString(),
         transactionId: transaction.transactionId,
@@ -99,45 +100,157 @@ class StripePaymentProvider extends PaymentProviderInterface {
   }
 
   /**
-   * Verifies the status of a checkout session or payment intent.
+   * Verifies the authenticity and execution status of a transaction against authoritative records.
+   * Never trusts client-supplied session objects. Performs direct live Stripe retrieval or uses
+   * cryptographically verified webhook event objects.
    */
-  async verifyPayment({ transactionId, payload = {} }) {
+  async verifyPayment({ transactionId, payload = {}, transaction, invoice, student }) {
     const stripe = this.getStripeClient();
-    const sessionId = payload.sessionId || payload.session?.id || payload.providerReference;
 
-    if (!sessionId) {
+    // Session ID strictly resolved from stored transaction or explicit lookup
+    const sessionId =
+      transaction?.stripeCheckoutSessionId ||
+      payload.sessionId ||
+      payload.providerReference ||
+      payload.verifiedSession?.id;
+
+    if (!sessionId && !payload.verifiedSession) {
       throw new Error('Stripe session identifier is required for verification.');
     }
 
-    const session = payload.session || (await stripe.checkout.sessions.retrieve(sessionId));
+    // Never accept unverified payload.session from clients.
+    // Use verifiedSession (from HMAC-validated webhook) or live retrieval from Stripe API.
+    const session = payload.verifiedSession || (await stripe.checkout.sessions.retrieve(sessionId));
 
-    if (session.payment_status === 'paid') {
-      const intentId = typeof session.payment_intent === 'string'
-        ? session.payment_intent
-        : session.payment_intent?.id || session.id;
-
+    if (!session || typeof session !== 'object') {
       return {
-        isVerified: true,
-        status: 'SUCCESS',
-        paidAmount: (session.amount_total || 0) / 100,
-        currency: (session.currency || 'egp').toUpperCase(),
-        providerReference: intentId,
-        rawResponse: {
-          id: session.id,
-          payment_intent: intentId,
-          payment_status: session.payment_status,
-        },
+        isVerified: false,
+        status: 'FAILED',
+        failureReason: 'Unable to retrieve valid session from payment provider.',
+        paidAmount: 0,
+        currency: (invoice?.currency || 'EGP').toUpperCase(),
       };
     }
 
+    // Verify session ID matches stored transaction if transaction is provided
+    if (transaction?.stripeCheckoutSessionId && session.id !== transaction.stripeCheckoutSessionId) {
+      return {
+        isVerified: false,
+        status: 'FAILED',
+        failureReason: `Session ID mismatch: received ${session.id}, expected ${transaction.stripeCheckoutSessionId}`,
+        paidAmount: 0,
+        currency: (invoice?.currency || 'EGP').toUpperCase(),
+      };
+    }
+
+    // Mode check
+    if (session.mode !== 'payment') {
+      return {
+        isVerified: false,
+        status: 'FAILED',
+        failureReason: `Invalid checkout session mode: ${session.mode}`,
+        paidAmount: 0,
+        currency: (invoice?.currency || 'EGP').toUpperCase(),
+      };
+    }
+
+    // Payment status check
+    if (session.payment_status !== 'paid') {
+      const isExpired = session.status === 'expired';
+      return {
+        isVerified: false,
+        status: isExpired ? 'CANCELLED' : 'FAILED',
+        failureReason: `Stripe checkout session not settled. Payment status: ${session.payment_status}`,
+        paidAmount: 0,
+        currency: (session.currency || 'egp').toUpperCase(),
+        providerReference: session.id,
+        rawResponse: session,
+      };
+    }
+
+    // Authoritative Currency Check
+    const expectedCurrency = (invoice?.currency || transaction?.currency || 'EGP').toLowerCase();
+    if (String(session.currency || '').toLowerCase() !== expectedCurrency) {
+      return {
+        isVerified: false,
+        status: 'FAILED',
+        failureReason: `Currency mismatch: payment was ${session.currency}, expected ${expectedCurrency}`,
+        paidAmount: 0,
+        currency: (session.currency || 'egp').toUpperCase(),
+      };
+    }
+
+    // Authoritative Amount Check in Minor Units
+    const targetAmount = invoice?.amount != null ? invoice.amount : transaction?.amount;
+    if (targetAmount != null) {
+      const expectedAmountMinor = Math.round(Number(targetAmount) * 100);
+      if (Number(session.amount_total) !== expectedAmountMinor) {
+        return {
+          isVerified: false,
+          status: 'FAILED',
+          failureReason: `Amount mismatch: paid ${session.amount_total} minor units, expected ${expectedAmountMinor}`,
+          paidAmount: (session.amount_total || 0) / 100,
+          currency: (session.currency || 'egp').toUpperCase(),
+        };
+      }
+    }
+
+    // Ownership & Metadata Checks
+    const studentIdStr = student?._id
+      ? student._id.toString()
+      : transaction?.student?._id
+      ? transaction.student._id.toString()
+      : transaction?.student
+      ? transaction.student.toString()
+      : null;
+
+    if (studentIdStr && session.metadata?.studentId && session.metadata.studentId !== studentIdStr) {
+      return {
+        isVerified: false,
+        status: 'FAILED',
+        failureReason: 'Student ownership mismatch on payment session metadata.',
+        paidAmount: 0,
+        currency: (session.currency || 'egp').toUpperCase(),
+      };
+    }
+
+    const txIdStr = transactionId || transaction?.transactionId;
+    if (txIdStr && session.metadata?.transactionId && session.metadata.transactionId !== txIdStr) {
+      return {
+        isVerified: false,
+        status: 'FAILED',
+        failureReason: 'Transaction identifier mismatch on payment session metadata.',
+        paidAmount: 0,
+        currency: (session.currency || 'egp').toUpperCase(),
+      };
+    }
+
+    const invoiceIdStr = invoice?._id ? invoice._id.toString() : transaction?.invoice?._id ? transaction.invoice._id.toString() : null;
+    if (invoiceIdStr && session.metadata?.invoiceId && session.metadata.invoiceId !== invoiceIdStr) {
+      return {
+        isVerified: false,
+        status: 'FAILED',
+        failureReason: 'Invoice identifier mismatch on payment session metadata.',
+        paidAmount: 0,
+        currency: (session.currency || 'egp').toUpperCase(),
+      };
+    }
+
+    const intentId = typeof session.payment_intent === 'string'
+      ? session.payment_intent
+      : session.payment_intent?.id || session.id;
+
     return {
       isVerified: true,
-      status: 'FAILED',
-      failureReason: `Stripe checkout session not settled. Payment status: ${session.payment_status}`,
-      paidAmount: 0,
+      status: 'SUCCESS',
+      paidAmount: (session.amount_total || 0) / 100,
       currency: (session.currency || 'egp').toUpperCase(),
-      providerReference: session.id,
-      rawResponse: session,
+      providerReference: intentId,
+      rawResponse: {
+        id: session.id,
+        payment_intent: intentId,
+        payment_status: session.payment_status,
+      },
     };
   }
 

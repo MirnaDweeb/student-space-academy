@@ -1,5 +1,5 @@
 const router = require('express').Router();
-const { protect } = require('../middleware/auth');
+const { protect, authorize } = require('../middleware/auth');
 const { validate } = require('../middleware/validate');
 const { payInvoiceValidator } = require('../validators/cycleValidators');
 const ctrl = require('../controllers/paymentController');
@@ -30,7 +30,7 @@ router.post('/webhook', ctrl.handleStripeWebhook);
 // Student: Query session payment status (e.g. after return from Stripe checkout)
 router.get('/session-status/:sessionId', protect, ctrl.getPaymentSessionStatus);
 
-// Backward-compatible instant pay endpoint
-router.post('/:invoiceId/pay', protect, validate(payInvoiceValidator), ctrl.payInvoice);
+// Administrative offline payment settlement (cash/wire recorded by cashier)
+router.post('/:invoiceId/pay', protect, authorize('admin', 'superadmin'), validate(payInvoiceValidator), ctrl.payInvoice);
 
 module.exports = router;

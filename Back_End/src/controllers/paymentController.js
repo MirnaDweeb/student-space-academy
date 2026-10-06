@@ -189,22 +189,20 @@ async function initiatePayment(req, res, next) {
 }
 
 /**
- * Verifies gateway transaction outcome and finalizes enrollment.
+ * Verifies gateway transaction outcome against authoritative provider records.
  * POST /api/payments/verify
+ * Note: Never trusts client-supplied provider payloads or statuses.
  */
 async function verifyPayment(req, res, next) {
   try {
-    const { transactionId, providerPayload, simulateFailure } = req.body;
+    const { transactionId } = req.body;
     if (!transactionId) {
       throw new AppError('transactionId is required.', 400);
     }
 
+    // Strictly authenticate ownership and let backend query provider directly
     const result = await paymentService.verifyAndFinalizePayment({
       transactionId,
-      providerPayload: {
-        ...(providerPayload || {}),
-        simulateFailure: simulateFailure === true,
-      },
       studentId: req.user._id,
     });
 
@@ -212,7 +210,7 @@ async function verifyPayment(req, res, next) {
       success: result.success,
       message: result.success
         ? 'Payment verified and confirmed successfully! Enrollment finalized.'
-        : `Payment verification failed: ${result.failureReason}`,
+        : `Payment verification failed: ${result.failureReason || 'Not settled.'}`,
       data: result,
     });
   } catch (err) {
@@ -221,23 +219,20 @@ async function verifyPayment(req, res, next) {
 }
 
 /**
- * Backward-compatible payment endpoint (executes instant mock payment in dev).
+ * Administrative offline payment settlement endpoint.
  * POST /api/payments/:invoiceId/pay
+ * Strictly restricted to admin/superadmin for recording offline cash/bank-wire payments.
+ * Direct student self-settlement without gateway verification is forbidden.
  */
 async function payInvoice(req, res, next) {
   try {
     const isPrivileged = req.user && ['admin', 'superadmin'].includes(req.user.role);
-    const isDevOrTest = process.env.NODE_ENV !== 'production' || process.env.ALLOW_MOCK_PAYMENTS === 'true';
 
-    if (!isDevOrTest && !isPrivileged) {
-      throw new AppError('Direct payment confirmation is disabled in production. Payments must be processed through gateway verification.', 403);
+    if (!isPrivileged) {
+      throw new AppError('Direct student payment bypass is disabled. Tuition payments must be processed through the secure payment gateway.', 403);
     }
 
     const query = { _id: req.params.invoiceId };
-    if (!isPrivileged) {
-      query.student = req.user._id;
-    }
-
     const invoice = await Invoice.findOne(query);
     if (!invoice) throw new AppError('Invoice not found.', 404);
 
@@ -262,11 +257,11 @@ async function payInvoice(req, res, next) {
     }
 
     const { method, packageType } = req.body;
-    const result = await paymentService.confirmPayment({ invoice, method, packageType });
+    const result = await paymentService.confirmPayment({ invoice, method: method || 'BankTransfer', packageType });
 
     res.json({
       success: true,
-      message: 'Payment confirmed successfully. Enrollment finalized.',
+      message: 'Administrative payment confirmed successfully. Enrollment finalized.',
       data: result,
     });
   } catch (err) {
@@ -309,12 +304,17 @@ async function adminGet(req, res, next) {
 /**
  * Stripe Webhook Handler
  * POST /api/payments/webhook
- * Verifies cryptographic Stripe signature and idempotently confirms transaction.
+ * Verifies cryptographic Stripe HMAC signature and idempotently confirms transaction.
  */
 async function handleStripeWebhook(req, res, next) {
   const sig = req.headers['stripe-signature'];
   if (!sig) {
     return res.status(400).json({ error: 'Missing stripe-signature header.' });
+  }
+
+  if (!Buffer.isBuffer(req.rawBody)) {
+    console.error('[STRIPE WEBHOOK ERROR] req.rawBody is missing or not a buffer.');
+    return res.status(400).send('Webhook Error: raw body unavailable.');
   }
 
   const { getPaymentProvider } = require('../services/paymentProviders');
@@ -332,21 +332,97 @@ async function handleStripeWebhook(req, res, next) {
     switch (event.type) {
       case 'checkout.session.completed': {
         const session = event.data.object;
-        let transactionId = session.metadata?.transactionId;
 
-        if (!transactionId) {
-          const tx = await PaymentTransaction.findOne({ stripeCheckoutSessionId: session.id });
-          if (tx) transactionId = tx.transactionId;
+        // 1. Verify session mode & status
+        if (session.mode !== 'payment' || session.payment_status !== 'paid') {
+          console.warn(`[STRIPE WEBHOOK] Ignored un-settled session: ${session.id}, status: ${session.payment_status}`);
+          break;
         }
 
+        // 2. Resolve transaction
+        let transactionId = session.metadata?.transactionId;
+        let tx = null;
         if (transactionId) {
-          await paymentService.verifyAndFinalizePayment({
-            transactionId,
-            providerPayload: { session, sessionId: session.id },
-            providerReference: typeof session.payment_intent === 'string'
-              ? session.payment_intent
-              : session.id,
-          });
+          tx = await PaymentTransaction.findOne({ transactionId }).populate('invoice');
+        }
+        if (!tx) {
+          tx = await PaymentTransaction.findOne({ stripeCheckoutSessionId: session.id }).populate('invoice');
+        }
+
+        if (!tx) {
+          console.error(`[STRIPE WEBHOOK] Ignored: no transaction found for session ${session.id}`);
+          break;
+        }
+
+        // 3. Idempotency check: if already settled as Paid, acknowledge immediately
+        if (tx.status === 'Paid') {
+          break;
+        }
+
+        // 4. Verify currency matches authoritative transaction
+        const expectedCurrency = (tx.currency || 'EGP').toLowerCase();
+        if (String(session.currency || '').toLowerCase() !== expectedCurrency) {
+          console.error(`[STRIPE WEBHOOK] Currency mismatch for session ${session.id}: received ${session.currency}, expected ${expectedCurrency}`);
+          break;
+        }
+
+        // 5. Verify amount matches authoritative transaction amount in minor units
+        const expectedAmountMinor = Math.round(Number(tx.amount) * 100);
+        if (Number(session.amount_total) !== expectedAmountMinor) {
+          console.error(`[STRIPE WEBHOOK] Amount mismatch for session ${session.id}: received ${session.amount_total}, expected ${expectedAmountMinor}`);
+          break;
+        }
+
+        // 6. Verify student metadata matches transaction student
+        const txStudentId = tx.student?._id ? tx.student._id.toString() : tx.student?.toString();
+        if (session.metadata?.studentId && txStudentId && session.metadata.studentId !== txStudentId) {
+          console.error(`[STRIPE WEBHOOK] Student mismatch for session ${session.id}: metadata ${session.metadata.studentId} != ${txStudentId}`);
+          break;
+        }
+
+        // 7. Check if invoice was already Overdue/Expired/Cancelled (Late payment handling)
+        if (tx.invoice && ['Overdue', 'Expired', 'Cancelled'].includes(tx.invoice.status)) {
+          console.error(`[STRIPE WEBHOOK] REQUIRES MANUAL REFUND: Late payment received for ${tx.invoice.status} invoice ${tx.invoice._id}`);
+          tx.status = 'Requires_Refund';
+          tx.failureReason = `Late payment received after invoice ${tx.invoice.status}. Seat was released; manual financial reconciliation required.`;
+          tx.providerReference = typeof session.payment_intent === 'string'
+            ? session.payment_intent
+            : session.payment_intent?.id || session.id;
+          await tx.save();
+          break;
+        }
+
+        // 8. Atomically finalize payment and enrollment
+        await paymentService.verifyAndFinalizePayment({
+          transactionId: tx.transactionId,
+          verifiedSession: session,
+          providerReference: typeof session.payment_intent === 'string'
+            ? session.payment_intent
+            : session.payment_intent?.id || session.id,
+          webhookEventId: event.id,
+        });
+        break;
+      }
+
+      case 'checkout.session.expired': {
+        const session = event.data.object;
+        const tx = await PaymentTransaction.findOne({
+          $or: [
+            { stripeCheckoutSessionId: session.id },
+            { transactionId: session.metadata?.transactionId },
+          ],
+        }).populate('invoice');
+
+        if (tx && tx.status !== 'Paid') {
+          tx.status = 'Cancelled';
+          tx.failureReason = 'Checkout session expired (30-minute window).';
+          await tx.save();
+
+          // Revert invoice back to Pending so student can retry before the 72h deadline
+          if (tx.invoice && tx.invoice.status === 'Payment Initiated') {
+            tx.invoice.status = 'Pending';
+            await tx.invoice.save();
+          }
         }
         break;
       }
@@ -358,17 +434,36 @@ async function handleStripeWebhook(req, res, next) {
             { stripePaymentIntentId: intent.id },
             { 'metadata.sessionToken': intent.id },
           ],
-        });
+        }).populate('invoice');
+
         if (tx && tx.status !== 'Paid') {
           tx.status = 'Failed';
-          tx.failureReason = intent.last_payment_error?.message || 'Payment card declined.';
+          tx.failureReason = intent.last_payment_error?.message || 'Payment card declined by issuer.';
           await tx.save();
+
+          // Revert invoice back to Pending so student can retry
+          if (tx.invoice && tx.invoice.status === 'Payment Initiated') {
+            tx.invoice.status = 'Pending';
+            await tx.invoice.save();
+          }
+
+          try {
+            const { notify } = require('../services/notificationService');
+            await notify({
+              recipient: tx.student,
+              title: 'Payment Attempt Declined',
+              message: `Your tuition payment of ${tx.amount} ${tx.currency} could not be processed: ${tx.failureReason}. You can retry before the 72-hour deadline.`,
+              type: 'warning',
+              relatedCourse: tx.invoice?.course,
+              relatedApplication: tx.invoice?.application,
+            });
+          } catch (_) {}
         }
         break;
       }
 
       default:
-        // Acknowledge other event types
+        // Acknowledge other event types safely
         break;
     }
 
@@ -418,12 +513,15 @@ async function getPaymentSessionStatus(req, res, next) {
         const stripeProvider = getPaymentProvider('STRIPE');
         const verifyRes = await stripeProvider.verifyPayment({
           transactionId: transaction.transactionId,
+          transaction,
+          invoice: transaction.invoice,
+          student: transaction.student,
           payload: { sessionId },
         });
+
         if (verifyRes.isVerified && verifyRes.status === 'SUCCESS') {
           await paymentService.verifyAndFinalizePayment({
             transactionId: transaction.transactionId,
-            providerPayload: { sessionId },
             providerReference: verifyRes.providerReference,
           });
           const refreshed = await PaymentTransaction.findById(transaction._id).populate('invoice');

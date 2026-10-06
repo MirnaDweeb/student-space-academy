@@ -89,7 +89,7 @@ export default function PaymentsPage() {
       });
 
       let attempts = 0;
-      const maxAttempts = 4;
+      const maxAttempts = 6;
       const pollStatus = async () => {
         try {
           attempts++;
@@ -115,6 +115,33 @@ export default function PaymentsPage() {
                 paidAt: res.transaction.paymentDate || res.invoice.paidAt || new Date().toISOString(),
               });
             }
+          } else if (res.status === 'Requires_Refund') {
+            setStripeNotice({
+              type: 'warning',
+              title: isAr ? 'تنبيه: سداد بعد انتهاء المهلة' : 'Late Payment Detected',
+              message: isAr
+                ? 'تم استلام الدفعة بعد انتهاء مهلة الـ 72 ساعة المقررة. تم تسجيل المعاملة للمراجعة المالية من قبل إدارة الأكاديمية.'
+                : 'Payment arrived after the 72-hour deadline and reservation expiration. It has been recorded for administrative reconciliation.',
+            });
+            await loadData();
+          } else if (res.status === 'Failed') {
+            setStripeNotice({
+              type: 'danger',
+              title: isAr ? 'فشلت عملية الدفع' : 'Payment Failed',
+              message: isAr
+                ? 'تم رفض عملية السداد من جهة إصدار البطاقة. يمكنك إعادة المحاولة قبل انتهاء المهلة المحددة.'
+                : 'Payment was declined by the issuer. You can retry before your reservation deadline.',
+            });
+            await loadData();
+          } else if (res.status === 'Cancelled') {
+            setStripeNotice({
+              type: 'warning',
+              title: isAr ? 'تم إلغاء الجلسة' : 'Session Expired or Cancelled',
+              message: isAr
+                ? 'انتهت صلاحية جلسة السداد السابقة. يمكنك بدء جلسة دفع جديدة.'
+                : 'The previous checkout session has expired. You can initiate a new payment attempt.',
+            });
+            await loadData();
           } else if (attempts < maxAttempts) {
             setTimeout(pollStatus, 2500);
           } else {
@@ -203,9 +230,10 @@ export default function PaymentsPage() {
     }
   };
 
-  // Execute Payment Initiation & Verification Lifecycle
+  // Execute Payment Initiation Lifecycle (Redirects to official Stripe Checkout)
   const handleInitiateAndPay = async () => {
     if (!checkoutTarget) return;
+    if (checkoutStep === 'initiating' || checkoutStep === 'processing' || checkoutStep === 'verifying') return;
     setCheckoutError('');
     setCheckoutStep('initiating');
 
@@ -217,55 +245,28 @@ export default function PaymentsPage() {
         paymentMethod: paymentMethod,
       };
 
-      // Step 1: Initiate payment on backend
+      // Step 1: Initiate payment session on backend
       const initRes = await paymentService.initiate(payload);
       const redirectUrl = initRes.data?.redirectUrl || initRes.data?.paymentUrl;
-      const isMock = initRes.data?.isMock ?? false;
-      const transaction = initRes.data?.transaction;
-      const invoice = initRes.data?.invoice;
-      const clientSecret = initRes.data?.clientSecret || initRes.data?.sessionToken;
+
+      if (!redirectUrl) {
+        throw new Error(
+          initRes.message ||
+            (isAr
+              ? 'لم يتم استلام رابط جلسة الدفع من البوابة. يرجى المحاولة مرة أخرى أو التواصل مع إدارة الأكاديمية.'
+              : 'Failed to obtain a secure payment gateway session. Please try again or contact administration.')
+        );
+      }
 
       setCheckoutStep('processing');
 
-      // Step 2: In development mock gateway mode, complete verification seamlessly
-      if (isMock || !redirectUrl || redirectUrl.includes('mock') || redirectUrl.includes('sandbox')) {
-        setCheckoutStep('verifying');
-        // Brief simulated network timing for realistic institutional feedback
-        await new Promise((resolve) => setTimeout(resolve, 800));
-
-        const verifyRes = await paymentService.verify({
-          transactionId: transaction?.transactionId,
-          invoiceId: invoice?._id,
-          providerReference: transaction?.providerReference || clientSecret,
-          status: 'SUCCESS',
-        });
-
-        // Payment verified & finalized
-        const settledInvoice = verifyRes.data?.invoice || invoice;
-        const settledTxn = verifyRes.data?.transaction || transaction;
-
-        setCheckoutTarget(null);
-        setCheckoutStep('select');
-        await loadData();
-
-        setReceiptData({
-          invoice: settledInvoice,
-          transaction: settledTxn,
-          course: checkoutTarget.course || settledInvoice.course,
-          cohort: checkoutTarget.application?.cohort || settledInvoice.cohort,
-          packageType: selectedPackage,
-          amount: settledInvoice.amount,
-          currency: settledInvoice.currency || 'EGP',
-          paidAt: settledInvoice.paidAt || new Date().toISOString(),
-        });
-      } else {
-        // Real Stripe redirect
-        window.location.href = redirectUrl;
-      }
+      // Step 2: Redirect student securely to official Stripe Checkout session
+      window.location.href = redirectUrl;
     } catch (err) {
       setCheckoutStep('failed');
       setCheckoutError(
         err.response?.data?.message ||
+          err.message ||
           (isAr
             ? 'تعذر إتمام عملية الدفع. يرجى المحاولة مرة أخرى أو مراجعة إدارة الأكاديمية.'
             : 'Payment transaction failed. Please verify your details or try again.')
@@ -810,8 +811,8 @@ export default function PaymentsPage() {
                     <i className="fa-solid fa-lock text-success"></i>
                     <span>{isAr ? 'بيئة سداد مشفرة وآمنة وفقاً لمعايير وكالة الفضاء' : 'Encrypted & Secure Payment Gateway Environment'}</span>
                   </span>
-                  <span className="badge bg-secondary-subtle text-secondary small">
-                    DEVELOPMENT MOCK GATEWAY
+                  <span className="badge bg-primary-subtle text-primary small">
+                    STRIPE CHECKOUT
                   </span>
                 </div>
               </div>

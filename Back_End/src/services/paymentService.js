@@ -281,10 +281,28 @@ async function verifyAndFinalizePayment({ transactionId, providerPayload = {}, s
     };
   }
 
+  // Check if invoice is past due and seat was already released or cancelled
+  if (transaction.invoice && ['Overdue', 'Expired', 'Cancelled'].includes(transaction.invoice.status)) {
+    transaction.status = 'Requires_Refund';
+    transaction.failureReason = `Payment received after invoice was ${transaction.invoice.status}. Seat reservation was released; manual financial reconciliation required.`;
+    if (providerReference) transaction.providerReference = providerReference;
+    await transaction.save();
+    return {
+      success: false,
+      status: 'REQUIRES_MANUAL_REFUND',
+      failureReason: transaction.failureReason,
+      transaction,
+      invoice: transaction.invoice,
+    };
+  }
+
   const provider = getPaymentProvider(transaction.provider);
   const verifyResult = await provider.verifyPayment({
     transactionId: transaction.transactionId,
     payload: mergedPayload,
+    transaction,
+    invoice: transaction.invoice,
+    student: transaction.student,
   });
 
   if (!verifyResult.isVerified || verifyResult.status === 'FAILED' || verifyResult.status === 'CANCELLED') {
@@ -339,6 +357,9 @@ async function verifyAndFinalizePayment({ transactionId, providerPayload = {}, s
   transaction.status = 'Paid';
   transaction.paymentDate = new Date();
   transaction.providerReference = verifyResult.providerReference || transaction.providerReference;
+  if (rest.webhookEventId) {
+    transaction.metadata = { ...(transaction.metadata || {}), lastWebhookEventId: rest.webhookEventId };
+  }
   await transaction.save();
 
   const invoiceDoc = claimedInvoice || transaction.invoice;

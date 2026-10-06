@@ -13,7 +13,7 @@ const PaymentTransactionSchema = new mongoose.Schema(
     isMock: { type: Boolean, default: false },
     status: {
       type: String,
-      enum: ['Pending', 'Initiated', 'Paid', 'Success', 'Failed', 'Cancelled', 'Refunded'],
+      enum: ['Pending', 'Initiated', 'Paid', 'Success', 'Failed', 'Cancelled', 'Refunded', 'Requires_Refund'],
       default: 'Pending',
     },
     packageType: {
