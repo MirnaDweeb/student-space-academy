@@ -493,7 +493,7 @@ async function getPaymentSessionStatus(req, res, next) {
         { 'metadata.sessionToken': sessionId },
       ],
     })
-      .populate('invoice')
+      .populate({ path: 'invoice', populate: [{ path: 'course' }, { path: 'cohort' }] })
       .populate('student', 'fullName email');
 
     if (!transaction) {
@@ -524,7 +524,9 @@ async function getPaymentSessionStatus(req, res, next) {
             transactionId: transaction.transactionId,
             providerReference: verifyRes.providerReference,
           });
-          const refreshed = await PaymentTransaction.findById(transaction._id).populate('invoice');
+          const refreshed = await PaymentTransaction.findById(transaction._id)
+            .populate({ path: 'invoice', populate: [{ path: 'course' }, { path: 'cohort' }] })
+            .populate('student', 'fullName email');
           return res.json({
             success: true,
             status: refreshed.status,
@@ -532,6 +534,13 @@ async function getPaymentSessionStatus(req, res, next) {
             transaction: refreshed,
             invoice: refreshed.invoice,
           });
+        } else if (verifyRes.status === 'CANCELLED') {
+          transaction.status = 'Cancelled';
+          transaction.failureReason = verifyRes.failureReason || 'Checkout session expired or cancelled.';
+          await transaction.save();
+          if (transaction.invoice && transaction.invoice.status === 'Payment Initiated') {
+            await Invoice.findByIdAndUpdate(transaction.invoice._id, { status: 'Pending' });
+          }
         }
       } catch (_) {
         // Fall back to returning current database state

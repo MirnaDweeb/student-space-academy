@@ -202,7 +202,9 @@ async function initiatePayment({ invoiceId, applicationId, studentId, packageTyp
 
   // Create unique transaction record
   const transactionId = `TXN_${crypto.randomBytes(8).toString('hex').toUpperCase()}`;
-  const provider = getPaymentProvider();
+  // Enforce STRIPE provider for card payments unless explicitly overridden by environment
+  const providerName = process.env.PAYMENT_PROVIDER || (method === 'Card' ? 'STRIPE' : 'STRIPE');
+  const provider = getPaymentProvider(providerName);
 
   const transaction = await PaymentTransaction.create({
     invoice: invoice._id,
@@ -219,13 +221,26 @@ async function initiatePayment({ invoiceId, applicationId, studentId, packageTyp
 
   const studentUser = await User.findById(studentId).select('fullName email phone');
 
-  // Call provider adapter
-  const providerSession = await provider.initiatePayment({
-    invoice,
-    transaction,
-    student: studentUser,
-    returnUrl,
-  });
+  // Call provider adapter with robust error recovery
+  let providerSession;
+  try {
+    providerSession = await provider.initiatePayment({
+      invoice,
+      transaction,
+      student: studentUser,
+      returnUrl,
+    });
+  } catch (initErr) {
+    transaction.status = 'Failed';
+    transaction.failureReason = initErr.message || 'Payment gateway initiation failed.';
+    await transaction.save();
+
+    // Revert invoice back to Pending so student can safely retry
+    invoice.status = 'Pending';
+    await invoice.save();
+
+    throw initErr;
+  }
 
   transaction.providerReference = providerSession.providerReference;
   transaction.metadata = { sessionToken: providerSession.sessionToken };

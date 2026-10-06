@@ -11,7 +11,7 @@ import { LoadingState, StatusBadge, PageHeader } from '../../components/StateCom
 export default function PaymentsPage() {
   const { user, language = 'en', isRTL } = useAuth();
   const isAr = language === 'ar';
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const queryAppId = searchParams.get('applicationId');
   const queryInvoiceId = searchParams.get('invoiceId');
 
@@ -29,9 +29,17 @@ export default function PaymentsPage() {
   const [calculatedPricing, setCalculatedPricing] = useState(null);
   const [priceLoading, setPriceLoading] = useState(false);
 
-  // Official Receipt Modal state
+  // Official Receipt Modal & Return Settlement Flow states
   const [receiptData, setReceiptData] = useState(null);
-  const [stripeNotice, setStripeNotice] = useState(null);
+  const [paymentSessionFlow, setPaymentSessionFlow] = useState(null); // null | 'processing' | 'confirmed' | 'failed' | 'cancelled' | 'requires_refund' | 'timeout'
+  const [flowDetails, setFlowDetails] = useState(null);
+  const [pollAttempt, setPollAttempt] = useState(0);
+
+  const dismissFlowState = () => {
+    setPaymentSessionFlow(null);
+    setFlowDetails(null);
+    setSearchParams({});
+  };
 
   // Open / Select an invoice for payment
   const openCheckout = (target) => {
@@ -181,97 +189,111 @@ export default function PaymentsPage() {
     loadData();
   }, [queryAppId, queryInvoiceId]);
 
-  // Handle return from Stripe hosted checkout session
+  // Handle return from Stripe hosted checkout session with bounded retry & cleanup
   useEffect(() => {
     const sessionId = searchParams.get('session_id');
     const cancelled = searchParams.get('cancelled');
 
+    let isMounted = true;
+    let pollTimeoutId = null;
+
     if (cancelled === 'true') {
-      setStripeNotice({
-        type: 'warning',
+      setPaymentSessionFlow('cancelled');
+      setFlowDetails({
         title: isAr ? 'تم إلغاء جلسة الدفع' : 'Payment Session Cancelled',
         message: isAr
-          ? 'تم إلغاء عملية الدفع ولم يتم خصم أي مبالغ. يظل حجزك المقبول متاحاً لإعادة المحاولة.'
-          : 'Payment session was cancelled. No charges were made. Your accepted reservation remains open to retry before the deadline.',
+          ? 'تم إلغاء عملية الدفع ولم يتم خصم أي مبالغ. يظل حجزك المقبول متاحاً لإعادة المحاولة قبل انتهاء المهلة.'
+          : 'Payment session was cancelled. No charges were made. Your reservation remains open to retry before the deadline.',
       });
     } else if (sessionId) {
-      setStripeNotice({
-        type: 'info',
+      setPaymentSessionFlow('processing');
+      setFlowDetails({
         title: isAr ? 'جاري التحقق من حالة السداد...' : 'Verifying Payment Settlement...',
         message: isAr
-          ? 'جاري تأكيد معاملتك المالية مع وكالة الفضاء المصرية ونظام الدفع. يرجى الانتظار...'
-          : 'Confirming your payment with the Egyptian Space Agency financial settlement system. Please wait a moment...',
+          ? 'جاري تأكيد معاملتك المالية مع وكالة الفضاء المصرية وبوابة Stripe المشفرة. يرجى الانتظار...'
+          : 'Confirming your payment with the Egyptian Space Agency financial settlement system and Stripe gateway. Please wait a moment...',
       });
 
       let attempts = 0;
       const maxAttempts = 6;
+
       const pollStatus = async () => {
+        if (!isMounted) return;
         try {
           attempts++;
+          setPollAttempt(attempts);
           const res = await paymentService.getSessionStatus(sessionId);
+          if (!isMounted) return;
+
           if (res.isSettled || res.status === 'Paid') {
-            setStripeNotice({
-              type: 'success',
+            setPaymentSessionFlow('confirmed');
+            setFlowDetails({
               title: isAr ? 'تم تأكيد الدفع بنجاح!' : 'Payment Confirmed Successfully!',
               message: isAr
                 ? 'تم استلام المبلغ وتأكيد التحاقك بالبرنامج التدريبي. تم فتح جميع محتويات التدريب في منصتك.'
                 : 'Payment has been settled and verified. Your training program enrollment is finalized!',
+              invoice: res.invoice,
+              transaction: res.transaction,
+              course: res.invoice?.course,
+              cohort: res.invoice?.cohort,
+              packageType: res.transaction?.packageType || res.invoice?.packageType,
+              amount: res.transaction?.amount || res.invoice?.amount,
+              currency: res.transaction?.currency || res.invoice?.currency || 'EGP',
+              paidAt: res.transaction?.paymentDate || res.invoice?.paidAt || new Date().toISOString(),
             });
             await loadData();
-            if (res.invoice && res.transaction) {
-              setReceiptData({
-                invoice: res.invoice,
-                transaction: res.transaction,
-                course: res.invoice.course,
-                cohort: res.invoice.cohort,
-                packageType: res.transaction.packageType || res.invoice.packageType,
-                amount: res.transaction.amount || res.invoice.amount,
-                currency: res.transaction.currency || res.invoice.currency || 'EGP',
-                paidAt: res.transaction.paymentDate || res.invoice.paidAt || new Date().toISOString(),
-              });
-            }
           } else if (res.status === 'Requires_Refund') {
-            setStripeNotice({
-              type: 'warning',
+            setPaymentSessionFlow('requires_refund');
+            setFlowDetails({
               title: isAr ? 'تنبيه: سداد بعد انتهاء المهلة' : 'Late Payment Detected',
               message: isAr
-                ? 'تم استلام الدفعة بعد انتهاء مهلة الـ 72 ساعة المقررة. تم تسجيل المعاملة للمراجعة المالية من قبل إدارة الأكاديمية.'
-                : 'Payment arrived after the 72-hour deadline and reservation expiration. It has been recorded for administrative reconciliation.',
+                ? 'تم استلام الدفعة بعد انتهاء مهلة الـ 72 ساعة المقررة وإلغاء حجز المقعد. تم تسجيل المعاملة للمراجعة المالية من قبل إدارة الأكاديمية.'
+                : 'Payment arrived after the 72-hour deadline and reservation expiration. It has been safely recorded for administrative reconciliation.',
+              transaction: res.transaction,
+              invoice: res.invoice,
             });
             await loadData();
           } else if (res.status === 'Failed') {
-            setStripeNotice({
-              type: 'danger',
+            setPaymentSessionFlow('failed');
+            setFlowDetails({
               title: isAr ? 'فشلت عملية الدفع' : 'Payment Failed',
               message: isAr
-                ? 'تم رفض عملية السداد من جهة إصدار البطاقة. يمكنك إعادة المحاولة قبل انتهاء المهلة المحددة.'
-                : 'Payment was declined by the issuer. You can retry before your reservation deadline.',
+                ? 'تم رفض عملية السداد من جهة إصدار البطاقة. لم يتم خصم أي مبالغ. يمكنك إعادة المحاولة قبل انتهاء المهلة المحددة.'
+                : 'Payment was declined by the issuer. No charges were made. You can retry before your reservation deadline.',
+              failureReason: res.transaction?.failureReason || (isAr ? 'تم رفض البطاقة من قبل جهة الإصدار.' : 'Card declined by issuer.'),
+              transaction: res.transaction,
+              invoice: res.invoice,
             });
             await loadData();
           } else if (res.status === 'Cancelled') {
-            setStripeNotice({
-              type: 'warning',
+            setPaymentSessionFlow('cancelled');
+            setFlowDetails({
               title: isAr ? 'تم إلغاء الجلسة' : 'Session Expired or Cancelled',
               message: isAr
                 ? 'انتهت صلاحية جلسة السداد السابقة. يمكنك بدء جلسة دفع جديدة.'
                 : 'The previous checkout session has expired. You can initiate a new payment attempt.',
+              transaction: res.transaction,
+              invoice: res.invoice,
             });
             await loadData();
           } else if (attempts < maxAttempts) {
-            setTimeout(pollStatus, 2500);
+            pollTimeoutId = setTimeout(pollStatus, 2500);
           } else {
-            setStripeNotice({
-              type: 'info',
-              title: isAr ? 'عملية الدفع قيد التأكيد' : 'Payment Processing',
+            setPaymentSessionFlow('timeout');
+            setFlowDetails({
+              title: isAr ? 'المعاملة قيد المعالجة بالبنك' : 'Payment Processing',
               message: isAr
                 ? 'تم استلام طلب السداد وجاري معالجته عبر البنك. يرجى تحديث الصفحة بعد قليل لمراجعة حالة الفاتورة.'
                 : 'Your payment was received and is awaiting webhook settlement from Stripe. Please refresh this page shortly to view the confirmed status.',
+              transaction: res.transaction,
+              invoice: res.invoice,
             });
             await loadData();
           }
         } catch (err) {
-          setStripeNotice({
-            type: 'warning',
+          if (!isMounted) return;
+          setPaymentSessionFlow('failed');
+          setFlowDetails({
             title: isAr ? 'حالة السداد' : 'Payment Status',
             message:
               err.response?.data?.message ||
@@ -285,6 +307,11 @@ export default function PaymentsPage() {
 
       pollStatus();
     }
+
+    return () => {
+      isMounted = false;
+      if (pollTimeoutId) clearTimeout(pollTimeoutId);
+    };
   }, [searchParams]);
 
   // Execute Payment Initiation Lifecycle (Redirects to official Stripe Checkout)
@@ -391,33 +418,171 @@ export default function PaymentsPage() {
         ]}
       />
 
-      {/* 2. Stripe Return Feedback Banner */}
-      {stripeNotice && (
-        <div
-          className={`alert alert-${stripeNotice.type === 'error' ? 'danger' : stripeNotice.type} alert-dismissible fade show mb-4 shadow-sm border-0`}
-          role="alert"
-        >
-          <div className="d-flex align-items-center gap-2">
-            <i
-              className={`fa-solid ${
-                stripeNotice.type === 'success'
-                  ? 'fa-circle-check fs-5 text-success'
-                  : stripeNotice.type === 'warning'
-                  ? 'fa-triangle-exclamation fs-5 text-warning'
-                  : 'fa-spinner fa-spin fs-5 text-info'
-              }`}
-            ></i>
-            <div>
-              <strong className="d-block">{stripeNotice.title}</strong>
-              <span className="small">{stripeNotice.message}</span>
+      {/* 2. Stripe Return Feedback & Verification States */}
+      {paymentSessionFlow && (
+        <div className="card border-0 shadow-sm mb-5 overflow-hidden">
+          {paymentSessionFlow === 'processing' && (
+            <div className="card-body p-4 p-md-5 text-center bg-white border-top border-4 border-info">
+              <div className="spinner-border text-primary mb-3" style={{ width: '3.5rem', height: '3.5rem' }} role="status">
+                <span className="visually-hidden">Loading...</span>
+              </div>
+              <h4 className="fw-bold text-dark mb-2">
+                {flowDetails?.title || (isAr ? 'جاري التحقق من عملية السداد...' : 'Verifying Payment Settlement...')}
+              </h4>
+              <p className="text-muted small mb-3 mx-auto" style={{ maxWidth: '540px' }}>
+                {flowDetails?.message}
+              </p>
+              <div className="badge bg-info-subtle text-info p-2 px-3 small">
+                <i className="fa-solid fa-arrows-rotate fa-spin me-2"></i>
+                {isAr ? `فحص حالة السداد مع Stripe (المحاولة ${pollAttempt} من ٦)…` : `Checking Stripe confirmation (Attempt ${pollAttempt} of 6)…`}
+              </div>
             </div>
-          </div>
-          <button
-            type="button"
-            className="btn-close"
-            aria-label="Close"
-            onClick={() => setStripeNotice(null)}
-          ></button>
+          )}
+
+          {paymentSessionFlow === 'confirmed' && (
+            <div className="card-body p-4 p-md-5 text-center bg-white border-top border-4 border-success">
+              <div
+                className="d-inline-flex align-items-center justify-content-center rounded-circle bg-success-subtle text-success mb-3"
+                style={{ width: '64px', height: '64px' }}
+              >
+                <i className="fa-solid fa-circle-check fs-2"></i>
+              </div>
+              <h4 className="fw-bold text-dark mb-2">{flowDetails?.title}</h4>
+              <p className="text-muted small mb-4 mx-auto" style={{ maxWidth: '540px' }}>
+                {flowDetails?.message}
+              </p>
+              <div className="d-flex justify-content-center flex-wrap gap-2">
+                {flowDetails?.invoice && (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => {
+                      setReceiptData({
+                        invoice: flowDetails.invoice,
+                        transaction: flowDetails.transaction,
+                        course: flowDetails.course || flowDetails.invoice?.course,
+                        cohort: flowDetails.cohort || flowDetails.invoice?.cohort,
+                        packageType: flowDetails.packageType || flowDetails.invoice?.packageType,
+                        amount: flowDetails.amount || flowDetails.invoice?.amount,
+                        currency: flowDetails.currency || flowDetails.invoice?.currency || 'EGP',
+                        paidAt: flowDetails.paidAt || new Date().toISOString(),
+                      });
+                    }}
+                  >
+                    <i className="fa-solid fa-receipt me-1"></i>
+                    {isAr ? 'عرض الإيصال الرسمي المعتمد' : 'View Official EGSA Receipt'}
+                  </button>
+                )}
+                <Link to="/student/training" className="btn btn-outline-success">
+                  <i className="fa-solid fa-graduation-cap me-1"></i>
+                  {isAr ? 'الانتقال إلى تدريبي' : 'Go to My Training'}
+                </Link>
+                <button type="button" className="btn btn-outline-secondary" onClick={dismissFlowState}>
+                  {isAr ? 'إغلاق والعودة للفواتير' : 'Back to Invoices'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {paymentSessionFlow === 'failed' && (
+            <div className="card-body p-4 p-md-5 text-center bg-white border-top border-4 border-danger">
+              <div
+                className="d-inline-flex align-items-center justify-content-center rounded-circle bg-danger-subtle text-danger mb-3"
+                style={{ width: '64px', height: '64px' }}
+              >
+                <i className="fa-solid fa-circle-xmark fs-2"></i>
+              </div>
+              <h4 className="fw-bold text-dark mb-2">{flowDetails?.title}</h4>
+              <p className="text-muted small mb-2 mx-auto" style={{ maxWidth: '540px' }}>
+                {flowDetails?.message}
+              </p>
+              {flowDetails?.failureReason && (
+                <div className="alert alert-danger d-inline-block py-2 px-3 small mb-4">
+                  <strong>{isAr ? 'سبب الرفض: ' : 'Decline Reason: '}</strong>
+                  {flowDetails.failureReason}
+                </div>
+              )}
+              <div className="d-flex justify-content-center flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    dismissFlowState();
+                    if (checkoutTarget) window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                >
+                  <i className="fa-solid fa-arrows-rotate me-1"></i>
+                  {isAr ? 'إعادة محاولة السداد' : 'Retry Payment'}
+                </button>
+                <button type="button" className="btn btn-outline-secondary" onClick={dismissFlowState}>
+                  {isAr ? 'إغلاق' : 'Dismiss'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {paymentSessionFlow === 'cancelled' && (
+            <div className="card-body p-4 p-md-5 text-center bg-white border-top border-4 border-warning">
+              <div
+                className="d-inline-flex align-items-center justify-content-center rounded-circle bg-warning-subtle text-warning mb-3"
+                style={{ width: '64px', height: '64px' }}
+              >
+                <i className="fa-solid fa-triangle-exclamation fs-2"></i>
+              </div>
+              <h4 className="fw-bold text-dark mb-2">{flowDetails?.title}</h4>
+              <p className="text-muted small mb-4 mx-auto" style={{ maxWidth: '540px' }}>
+                {flowDetails?.message}
+              </p>
+              <div className="d-flex justify-content-center flex-wrap gap-2">
+                <button type="button" className="btn btn-primary" onClick={dismissFlowState}>
+                  <i className="fa-solid fa-credit-card me-1"></i>
+                  {isAr ? 'العودة لنموذج السداد' : 'Proceed to Payment Form'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {paymentSessionFlow === 'requires_refund' && (
+            <div className="card-body p-4 p-md-5 text-center bg-white border-top border-4 border-warning">
+              <div
+                className="d-inline-flex align-items-center justify-content-center rounded-circle bg-warning-subtle text-warning mb-3"
+                style={{ width: '64px', height: '64px' }}
+              >
+                <i className="fa-solid fa-clock-rotate-left fs-2"></i>
+              </div>
+              <h4 className="fw-bold text-dark mb-2">{flowDetails?.title}</h4>
+              <p className="text-muted small mb-4 mx-auto" style={{ maxWidth: '540px' }}>
+                {flowDetails?.message}
+              </p>
+              <button type="button" className="btn btn-outline-secondary" onClick={dismissFlowState}>
+                {isAr ? 'إغلاق' : 'Dismiss'}
+              </button>
+            </div>
+          )}
+
+          {paymentSessionFlow === 'timeout' && (
+            <div className="card-body p-4 p-md-5 text-center bg-white border-top border-4 border-info">
+              <div
+                className="d-inline-flex align-items-center justify-content-center rounded-circle bg-info-subtle text-info mb-3"
+                style={{ width: '64px', height: '64px' }}
+              >
+                <i className="fa-solid fa-hourglass-half fs-2"></i>
+              </div>
+              <h4 className="fw-bold text-dark mb-2">{flowDetails?.title}</h4>
+              <p className="text-muted small mb-4 mx-auto" style={{ maxWidth: '540px' }}>
+                {flowDetails?.message}
+              </p>
+              <div className="d-flex justify-content-center flex-wrap gap-2">
+                <button type="button" className="btn btn-primary" onClick={loadData}>
+                  <i className="fa-solid fa-arrows-rotate me-1"></i>
+                  {isAr ? 'تحديث الفواتير' : 'Refresh Invoices'}
+                </button>
+                <button type="button" className="btn btn-outline-secondary" onClick={dismissFlowState}>
+                  {isAr ? 'إغلاق' : 'Dismiss'}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -441,7 +606,7 @@ export default function PaymentsPage() {
       {error && <div className="alert alert-danger mb-4">{error}</div>}
 
       {/* 4. ACTIVE COURSE PAYMENT FORM & CHECKOUT INTERFACE */}
-      {checkoutTarget ? (
+      {checkoutTarget && !['processing', 'confirmed'].includes(paymentSessionFlow) ? (
         <div className="card border-0 shadow-sm mb-5 border-top border-4 border-primary">
           <div className="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center flex-wrap gap-2">
             <div className="d-flex align-items-center gap-2">
@@ -675,7 +840,7 @@ export default function PaymentsPage() {
                       {checkoutStep === 'initiating' || checkoutStep === 'processing' ? (
                         <>
                           <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                          <span>{isAr ? 'جاري تهيئة جلسة السداد المشفرة…' : 'Preparing Secure Stripe Checkout…'}</span>
+                          <span>{isAr ? 'جاري التوجيه إلى بوابة Stripe المشفرة…' : 'Redirecting to Secure Stripe Checkout…'}</span>
                         </>
                       ) : (
                         <>
