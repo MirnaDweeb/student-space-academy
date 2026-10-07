@@ -1,29 +1,213 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { courseService } from '../../services/courseService';
+import { applicationService } from '../../services/cycleServices';
+import { useAuth } from '../../context/AuthContext.jsx';
 import { LoadingState, ErrorState, PageHeader } from '../../components/StateComponents.jsx';
 
 export default function CourseDetailsPage() {
   const { id } = useParams();
+  const navigate = useNavigate();
+  const { isAuthenticated } = useAuth();
   const [course, setCourse] = useState(null);
+  const [application, setApplication] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [isEnrolling, setIsEnrolling] = useState(false);
 
   const load = () => {
     setLoading(true);
     setError('');
-    courseService
-      .get(id)
-      .then((res) => setCourse(res.data))
+
+    const coursePromise = courseService.get(id);
+    const appPromise = isAuthenticated
+      ? applicationService.my().catch(() => ({ data: [] }))
+      : Promise.resolve({ data: [] });
+
+    Promise.all([coursePromise, appPromise])
+      .then(([courseRes, appRes]) => {
+        setCourse(courseRes.data);
+        const apps = appRes.data || [];
+        const matched = apps.find((a) => (a.course?._id || a.course)?.toString() === id);
+        setApplication(matched || null);
+      })
       .catch((err) => setError(err.response?.data?.message || 'Failed to load course details.'))
       .finally(() => setLoading(false));
   };
 
   useEffect(load, [id]);
 
+  const handleDirectEnroll = async () => {
+    if (!isAuthenticated) {
+      navigate(`/student/login?redirect=/student/courses/${id}`);
+      return;
+    }
+
+    try {
+      setIsEnrolling(true);
+      const res = await applicationService.create({
+        courseId: id,
+        directEnroll: true,
+      });
+
+      const app = res.data;
+      const invId = res.invoice?._id || app?.invoice?._id || app?.invoice;
+
+      if (app?.status === 'Waitlisted') {
+        navigate('/student/applications');
+      } else if (invId) {
+        navigate(`/student/payments?invoiceId=${invId}&applicationId=${app._id}`);
+      } else {
+        navigate('/student/applications');
+      }
+    } catch (err) {
+      console.error('Direct enrollment failed:', err);
+      alert(err.response?.data?.message || 'Failed to initialize direct enrollment.');
+    } finally {
+      setIsEnrolling(false);
+    }
+  };
+
   if (loading) return <LoadingState label="Loading space academy curriculum…" />;
   if (error) return <ErrorState message={error} onRetry={load} />;
   if (!course) return null;
+
+  const renderAction = (isHeader = false) => {
+    const btnSize = isHeader ? 'btn-sm px-3' : 'py-2';
+    if (application) {
+      if (application.enrollment || application.status === 'Confirmed') {
+        return (
+          <Link to="/student/dashboard" className={`btn btn-success ${btnSize}`}>
+            <i className="fa-solid fa-circle-check me-1"></i> Enrolled
+          </Link>
+        );
+      }
+      if (application.status === 'Waitlisted') {
+        return (
+          <Link to={`/student/applications/${application._id}`} className={`btn btn-secondary ${btnSize}`}>
+            <i className="fa-solid fa-clock me-1"></i> Waitlisted (#{application.waitlistPosition || 1})
+          </Link>
+        );
+      }
+      if (['Accepted', 'Eligible - Payment Pending'].includes(application.status)) {
+        const inv = application.invoice;
+        const invId = inv?._id || (typeof inv === 'string' ? inv : '');
+        if (inv?.status === 'Payment Initiated') {
+          return (
+            <Link
+              to={`/student/payments?invoiceId=${invId}&applicationId=${application._id}`}
+              className={`btn btn-accent ${btnSize} fw-bold`}
+            >
+              <i className="fa-solid fa-spinner fa-spin me-1"></i> Continue Payment
+            </Link>
+          );
+        }
+        return (
+          <Link
+            to={`/student/payments?invoiceId=${invId}&applicationId=${application._id}`}
+            className={`btn btn-accent ${btnSize} fw-bold`}
+          >
+            <i className="fa-solid fa-credit-card me-1"></i> Pay Now
+          </Link>
+        );
+      }
+      if (application.status === 'Manual Review') {
+        return (
+          <Link to={`/student/applications/${application._id}`} className={`btn btn-outline-info text-dark ${btnSize}`}>
+            <i className="fa-solid fa-clipboard-user me-1"></i> Manual Review Required
+          </Link>
+        );
+      }
+      if (application.status === 'Under Review') {
+        return (
+          <Link to={`/student/applications/${application._id}`} className={`btn btn-outline-info text-dark ${btnSize}`}>
+            <i className="fa-solid fa-clipboard-user me-1"></i> Under Review
+          </Link>
+        );
+      }
+      if (application.status === 'Foundation Recommended') {
+        return (
+          <Link to={`/student/applications/${application._id}/foundation`} className={`btn btn-outline-warning text-dark ${btnSize}`}>
+            <i className="fa-solid fa-graduation-cap me-1"></i> Review Foundation Request
+          </Link>
+        );
+      }
+    }
+
+    if (course.price == null) {
+      return (
+        <button className={`btn btn-secondary ${btnSize}`} disabled>
+          Pricing TBA
+        </button>
+      );
+    }
+
+    // Path A (Enroll & Pay Now) + Path B (Check My Readiness)
+    if (isHeader) {
+      return (
+        <div className="d-flex align-items-center gap-2">
+          <button
+            type="button"
+            className="btn btn-primary btn-sm fw-bold shadow-sm"
+            onClick={handleDirectEnroll}
+            disabled={isEnrolling}
+          >
+            {isEnrolling ? (
+              <>
+                <span className="spinner-border spinner-border-sm me-1" role="status"></span>
+                Processing…
+              </>
+            ) : (
+              <>
+                <i className="fa-solid fa-credit-card me-1"></i> Enroll & Pay Now
+              </>
+            )}
+          </button>
+          <Link
+            to={`/student/readiness/start?courseId=${course._id}`}
+            className="btn btn-outline-primary btn-sm fw-semibold"
+            title="Evaluate readiness before enrolling"
+          >
+            <i className="fa-solid fa-clipboard-check me-1"></i> Check Readiness
+          </Link>
+        </div>
+      );
+    }
+
+    return (
+      <div className="d-flex flex-column gap-2 w-100">
+        <button
+          type="button"
+          className="btn btn-primary py-2 fw-bold w-100 shadow-sm"
+          onClick={handleDirectEnroll}
+          disabled={isEnrolling}
+        >
+          {isEnrolling ? (
+            <>
+              <span className="spinner-border spinner-border-sm me-2" role="status"></span>
+              Processing Direct Enrollment…
+            </>
+          ) : (
+            <>
+              <i className="fa-solid fa-credit-card me-2"></i> Enroll & Pay Now
+            </>
+          )}
+        </button>
+        <Link
+          to={`/student/readiness/start?courseId=${course._id}`}
+          className="btn btn-outline-primary py-2 w-100 fw-semibold"
+        >
+          <i className="fa-solid fa-clipboard-check me-2"></i> Check My Readiness (Optional)
+        </Link>
+        <div className="text-center pt-1">
+          <small className="text-muted" style={{ fontSize: '0.75rem' }}>
+            <i className="fa-regular fa-circle-check text-success me-1"></i>
+            Assessment optional · Direct pay available
+          </small>
+        </div>
+      </div>
+    );
+  };
 
   const hasModules = Array.isArray(course.modules) && course.modules.length > 0;
   const hasObjectives = Array.isArray(course.learningObjectives) && course.learningObjectives.length > 0;
@@ -53,17 +237,7 @@ export default function CourseDetailsPage() {
           { label: 'Explore Programs', to: '/student/programs' },
           { label: course.title },
         ]}
-        actions={
-          course.price != null ? (
-            <Link to={`/student/courses/${course._id}/fit`} className="btn btn-primary btn-sm px-3">
-              <i className="fa-solid fa-clipboard-check me-1"></i> Check My Fit & Apply
-            </Link>
-          ) : (
-            <button className="btn btn-secondary btn-sm" disabled>
-              Applications Opening Soon
-            </button>
-          )
-        }
+        actions={renderAction(true)}
       />
 
       {/* Official Academy Header Banner */}
@@ -115,6 +289,39 @@ export default function CourseDetailsPage() {
       <div className="row g-4">
         {/* Left Main Content */}
         <div className="col-lg-8">
+          {/* Admissions Status Alert Banner */}
+          {application && (
+            <div
+              className={`alert ${
+                application.enrollment || application.status === 'Confirmed'
+                  ? 'alert-success border-success'
+                  : ['Accepted', 'Eligible - Payment Pending'].includes(application.status)
+                  ? 'alert-primary border-primary'
+                  : application.status === 'Waitlisted'
+                  ? 'alert-secondary'
+                  : ['Under Review', 'Manual Review'].includes(application.status)
+                  ? 'alert-info border-info'
+                  : 'alert-warning border-warning'
+              } d-flex justify-content-between align-items-center mb-4 p-3 shadow-sm flex-wrap gap-2`}
+            >
+              <div>
+                <span className="badge bg-dark me-2">Admissions: {application.status}</span>
+                <span className="small text-dark fw-semibold">
+                  {['Accepted', 'Eligible - Payment Pending'].includes(application.status)
+                    ? 'Your application is accepted! Complete tuition payment below to finalize your seat reservation.'
+                    : application.status === 'Under Review' || application.status === 'Manual Review'
+                    ? 'Your application and readiness attempt are currently being reviewed by the Admissions Committee.'
+                    : application.status === 'Foundation Recommended'
+                    ? 'Preparatory conditioning recommended prior to full cohort enrollment.'
+                    : application.status === 'Waitlisted'
+                    ? `Placed on waitlist at position #${application.waitlistPosition || 1}.`
+                    : 'Application reference: ' + (application.referenceNumber || application._id)}
+                </span>
+              </div>
+              <div>{renderAction(true)}</div>
+            </div>
+          )}
+
           {/* Program Overview */}
           <div className="egsa-card p-4 mb-4">
             <h5 className="fw-bold text-dark mb-3 d-flex align-items-center gap-2">
@@ -541,15 +748,7 @@ export default function CourseDetailsPage() {
             </ul>
 
             <div className="d-grid gap-2">
-              {course.price != null ? (
-                <Link to={`/student/courses/${course._id}/fit`} className="btn btn-primary">
-                  <i className="fa-solid fa-clipboard-check me-1"></i> Check My Fit & Apply
-                </Link>
-              ) : (
-                <button className="btn btn-secondary" disabled>
-                  Applications Open Once Pricing Published
-                </button>
-              )}
+              {renderAction(false)}
               <Link to="/student/programs" className="btn btn-outline-secondary">
                 <i className="fa-solid fa-arrow-left me-1"></i> Back to Catalog
               </Link>

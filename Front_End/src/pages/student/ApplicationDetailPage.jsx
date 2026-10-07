@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { applicationService } from '../../services/cycleServices';
 import { LoadingState, ErrorState, StatusBadge, PageHeader } from '../../components/StateComponents.jsx';
 
@@ -26,15 +26,19 @@ export function computeAdmissionsPipeline(application) {
   };
 
   // 2. Readiness / Eligibility Step
+  const isDirectPermitted = course.directEnrollmentPermitted !== false;
   const isPrereqBlocked =
-    status === 'Foundation Recommended' ||
-    application.eligibilityStatus === 'Not Eligible' ||
     fit?.result === 'Foundation Required' ||
-    readiness?.outcome === 'FOUNDATION_REQUIRED';
+    fit?.result === 'Not Eligible';
+
+  const isFoundationRecommended =
+    status === 'Foundation Recommended' ||
+    readiness?.outcome === 'FOUNDATION_REQUIRED' ||
+    readiness?.outcome === 'FOUNDATION_RECOMMENDED';
 
   const isReadinessCompleted =
     application.eligibilityStatus === 'Eligible' ||
-    (readiness && readiness.status === 'Submitted' && readiness.outcome !== 'FOUNDATION_REQUIRED');
+    (readiness && readiness.status === 'Submitted' && !isFoundationRecommended);
 
   const isReadinessInProgress =
     application.eligibilityStatus === 'In Progress' ||
@@ -46,13 +50,29 @@ export function computeAdmissionsPipeline(application) {
       key: 'Readiness',
       label: 'Readiness / Eligibility',
       state: 'blocked',
-      statusText: 'Not Eligible',
-      subtitle: 'Prerequisite or foundational knowledge required prior to enrollment',
+      statusText: 'Prerequisite Required',
+      subtitle: 'Prerequisite academic courses required prior to enrollment',
       action: {
-        label: 'Review Foundation Requirements',
+        label: 'Review Prerequisite Requirements',
         to: `/student/courses/${course._id}/fit`,
         variant: 'outline-warning',
         icon: 'fa-solid fa-triangle-exclamation',
+      },
+    };
+  } else if (isFoundationRecommended) {
+    step2 = {
+      key: 'Readiness',
+      label: 'Readiness / Eligibility',
+      state: 'warning',
+      statusText: isDirectPermitted ? 'Foundation Recommended (Advisory)' : 'Foundation Required',
+      subtitle: readiness?.score != null
+        ? `Readiness score: ${readiness.score}% — Academic prerequisites met. Foundational review advised.`
+        : 'Foundational review advised prior to specialization.',
+      action: {
+        label: 'Review Foundation Request',
+        to: `/student/applications/${application._id}/foundation`,
+        variant: 'outline-warning',
+        icon: 'fa-solid fa-graduation-cap',
       },
     };
   } else if (isReadinessCompleted) {
@@ -85,10 +105,12 @@ export function computeAdmissionsPipeline(application) {
     step2 = {
       key: 'Readiness',
       label: 'Readiness / Eligibility',
-      state: 'current',
-      statusText: 'Action Required',
-      subtitle: 'Complete readiness pre-test to qualify for seat review',
-      action: {
+      state: isDirectPermitted ? 'completed' : 'current',
+      statusText: isDirectPermitted ? 'Optional / Direct Entry' : 'Action Required',
+      subtitle: isDirectPermitted
+        ? 'Diagnostic assessment is optional. Direct entry permitted.'
+        : 'Complete readiness pre-test to qualify for seat review',
+      action: isDirectPermitted ? null : {
         label: 'Complete Readiness / Eligibility',
         to: `/student/readiness/start?courseId=${course._id}`,
         variant: 'primary',
@@ -108,7 +130,32 @@ export function computeAdmissionsPipeline(application) {
       subtitle: 'Seat allocation locked due to prerequisite requirements',
       action: null,
     };
-  } else if (!isReadinessCompleted) {
+  } else if (status === 'Foundation Recommended') {
+    if (isDirectPermitted) {
+      step3 = {
+        key: 'Review',
+        label: 'Review & Seat Allocation',
+        state: 'current',
+        statusText: 'Direct Admission Available',
+        subtitle: 'Direct enrollment permitted. You may proceed directly to seat reservation and tuition payment.',
+        action: {
+          label: 'Enroll & Pay Now',
+          to: `/student/payments?applicationId=${application._id}`,
+          variant: 'primary',
+          icon: 'fa-solid fa-credit-card',
+        },
+      };
+    } else {
+      step3 = {
+        key: 'Review',
+        label: 'Review & Seat Allocation',
+        state: 'blocked',
+        statusText: 'Not Available',
+        subtitle: 'Seat allocation awaiting prerequisite foundation completion',
+        action: null,
+      };
+    }
+  } else if (!isReadinessCompleted && !isDirectPermitted) {
     step3 = {
       key: 'Review',
       label: 'Review & Seat Allocation',
@@ -185,10 +232,10 @@ export function computeAdmissionsPipeline(application) {
         statusText: 'Payment Required',
         subtitle: 'Seat reserved. Complete payment to confirm official enrollment.',
         action: {
-          label: 'Proceed to Payment',
-          to: `/student/payments?applicationId=${application._id}`,
+          label: invoice?.status === 'Payment Initiated' ? 'Continue Payment' : 'Pay Now',
+          to: `/student/payments?invoiceId=${invoice?._id || (typeof invoice === 'string' ? invoice : '')}&applicationId=${application._id}`,
           variant: 'primary',
-          icon: 'fa-solid fa-credit-card',
+          icon: invoice?.status === 'Payment Initiated' ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-credit-card',
         },
       };
     }
@@ -201,13 +248,22 @@ export function computeAdmissionsPipeline(application) {
       subtitle: `Tuition settled (${invoice?.amount?.toLocaleString() || 0} ${invoice?.currency || 'EGP'})`,
       action: null,
     };
+  } else if (status === 'Foundation Recommended' && isDirectPermitted) {
+    step4 = {
+      key: 'Payment',
+      label: 'Payment & Confirmation',
+      state: 'upcoming',
+      statusText: 'Available via Direct Enrollment',
+      subtitle: 'Direct payment open upon seat reservation.',
+      action: null,
+    };
   } else {
     step4 = {
       key: 'Payment',
       label: 'Payment & Confirmation',
       state: 'locked',
       statusText: 'Payment Locked',
-      subtitle: 'Accessible only after formal acceptance and seat allocation',
+      subtitle: 'Accessible after formal acceptance or direct enrollment selection',
       action: null,
     };
   }
@@ -250,6 +306,24 @@ export default function ApplicationDetailPage() {
   const [cancelling, setCancelling] = useState(false);
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [cancelError, setCancelError] = useState('');
+  const [enrolling, setEnrolling] = useState(false);
+  const navigate = useNavigate();
+
+  const handleDirectEnroll = async () => {
+    setEnrolling(true);
+    try {
+      const res = await applicationService.directEnroll(id);
+      const invId = res.invoice?._id || application?.invoice?._id;
+      if (invId) {
+        navigate(`/student/payments?invoiceId=${invId}&applicationId=${id}`);
+      } else {
+        navigate(`/student/payments?applicationId=${id}`);
+      }
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to process direct enrollment.');
+      setEnrolling(false);
+    }
+  };
 
   const load = () => {
     setLoading(true);
@@ -284,6 +358,7 @@ export default function ApplicationDetailPage() {
   const course = application.course || {};
   const cohort = application.cohort || {};
   const readiness = application.readinessAttempt || null;
+  const fit = application.fitResultSnapshot || null;
   const history = application.statusHistory || [];
   const canCancel = ['Draft', 'Submitted', 'Under Review', 'Manual Review', 'Accepted', 'Eligible - Payment Pending', 'Waitlisted'].includes(application.status);
 
@@ -444,16 +519,37 @@ export default function ApplicationDetailPage() {
 
               {application.status === 'Foundation Recommended' && (
                 <div>
-                  <h6 className="fw-bold text-accent-egsa mb-1">
-                    <i className="fa-solid fa-triangle-exclamation text-warning me-2"></i>
-                    Foundation Preparation Recommended
-                  </h6>
-                  <p className="text-muted small mb-2">
-                    Prerequisite analysis indicates foundational concepts are required prior to this specialization.
-                  </p>
-                  <Link to={`/student/courses/${course._id}/fit`} className="btn btn-outline-primary btn-sm">
-                    Review Prerequisite Requirements
-                  </Link>
+                  <div className="d-flex flex-column flex-sm-row justify-content-between align-items-start align-items-sm-center gap-2 mb-2">
+                    <div>
+                      <h6 className="fw-bold text-dark mb-1">
+                        <i className="fa-solid fa-triangle-exclamation text-warning me-2"></i>
+                        Foundation Preparation Recommended
+                      </h6>
+                      <p className="text-muted small mb-0">
+                        {course.directEnrollmentPermitted !== false
+                          ? 'Your readiness assessment indicates foundational review is advised. Because direct enrollment is permitted, you may proceed with payment or review recommendations.'
+                          : 'Prerequisite analysis indicates foundational concepts are required prior to this specialization.'}
+                      </p>
+                    </div>
+                    <div className="d-flex gap-2 flex-wrap mt-2 mt-sm-0">
+                      <Link
+                        to={`/student/applications/${application._id}/foundation`}
+                        className="btn btn-outline-warning btn-sm fw-semibold"
+                      >
+                        <i className="fa-solid fa-graduation-cap me-1"></i> Review Foundation Request
+                      </Link>
+                      {course.directEnrollmentPermitted !== false && (
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-sm fw-bold px-3"
+                          onClick={handleDirectEnroll}
+                          disabled={enrolling}
+                        >
+                          <i className="fa-solid fa-credit-card me-1"></i> Enroll & Pay Now
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -513,6 +609,72 @@ export default function ApplicationDetailPage() {
                   </p>
                 </div>
               )}
+            </div>
+          </div>
+
+          {/* Dual Evaluation Breakdown Card */}
+          <div className="egsa-card mb-4 p-4 shadow-sm">
+            <h6 className="fw-bold text-dark mb-3 d-flex align-items-center gap-2">
+              <i className="fa-solid fa-clipboard-check text-primary-egsa"></i>
+              Admissions Evaluation & Readiness Standards
+            </h6>
+            <div className="row g-3">
+              <div className="col-md-4">
+                <div className="p-3 bg-light rounded border h-100">
+                  <div className="text-muted small fw-bold text-uppercase mb-1">Prerequisite Fit</div>
+                  <div className="d-flex align-items-center gap-2 mb-1">
+                    <span className={`badge ${fit?.result === 'Eligible' || application.eligibilityStatus === 'Eligible' ? 'bg-success' : 'bg-warning text-dark'}`}>
+                      {fit?.result || (application.eligibilityStatus === 'Eligible' ? 'Eligible' : 'Under Review')}
+                    </span>
+                  </div>
+                  <small className="text-muted d-block">
+                    {fit?.result === 'Eligible' || application.eligibilityStatus === 'Eligible'
+                      ? 'Academic qualifications and prerequisite experience satisfied.'
+                      : 'Prerequisite requirements undergoing verification.'}
+                  </small>
+                </div>
+              </div>
+
+              <div className="col-md-4">
+                <div className="p-3 bg-light rounded border h-100">
+                  <div className="text-muted small fw-bold text-uppercase mb-1">Readiness Assessment</div>
+                  <div className="d-flex align-items-center gap-2 mb-1">
+                    <span className={`badge ${
+                      readiness?.outcome === 'READY' || readiness?.outcome === 'ELIGIBLE'
+                        ? 'bg-success'
+                        : readiness?.outcome === 'FOUNDATION_REQUIRED' || application.status === 'Foundation Recommended'
+                        ? 'bg-warning text-dark'
+                        : 'bg-secondary'
+                    }`}>
+                      {readiness?.outcome?.replace(/_/g, ' ') || (application.status === 'Foundation Recommended' ? 'Foundation Recommended' : 'Diagnostic Complete')}
+                    </span>
+                    {readiness?.score != null && (
+                      <span className="fw-bold text-primary-egsa small">({readiness.score}%)</span>
+                    )}
+                  </div>
+                  <small className="text-muted d-block">
+                    {readiness?.outcome === 'FOUNDATION_REQUIRED' || application.status === 'Foundation Recommended'
+                      ? 'Diagnostic assessment suggests foundational conditioning review.'
+                      : 'Diagnostic assessment successfully verified.'}
+                  </small>
+                </div>
+              </div>
+
+              <div className="col-md-4">
+                <div className="p-3 bg-light rounded border h-100">
+                  <div className="text-muted small fw-bold text-uppercase mb-1">Admission Mode</div>
+                  <div className="d-flex align-items-center gap-2 mb-1">
+                    <span className={`badge ${course.directEnrollmentPermitted !== false ? 'bg-info text-dark' : 'bg-secondary'}`}>
+                      {course.directEnrollmentPermitted !== false ? 'Direct Enrollment Active' : 'Prerequisite Gated'}
+                    </span>
+                  </div>
+                  <small className="text-muted d-block">
+                    {course.directEnrollmentPermitted !== false
+                      ? 'Readiness is optional; direct enrollment and payment permitted.'
+                      : 'Readiness completion is mandatory prior to seat allocation.'}
+                  </small>
+                </div>
+              </div>
             </div>
           </div>
 

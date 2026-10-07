@@ -12,6 +12,25 @@ const { AppError } = require('../middleware/error');
 async function myPayments(req, res, next) {
   try {
     await paymentService.processExpiredInvoices();
+
+    // Ensure all eligible applications have valid issued invoices discoverable by student
+    try {
+      const eligibleApps = await Application.find({
+        student: req.user._id,
+        eligibilityStatus: 'Eligible',
+        status: { $in: ['Under Review', 'Submitted', 'Draft', 'Accepted', 'Eligible - Payment Pending'] },
+      });
+      for (const app of eligibleApps) {
+        const invExists = await Invoice.exists({ application: app._id });
+        if (!invExists) {
+          const { autoAcceptAndReserveSeat } = require('../services/admissionService');
+          await autoAcceptAndReserveSeat({ application: app });
+        }
+      }
+    } catch (healErr) {
+      console.error('[AUTO HEAL ERROR in myPayments]:', healErr.message);
+    }
+
     const invoices = await Invoice.find({ student: req.user._id })
       .populate('course', 'title startDate price transportationPrice currency level')
       .populate('cohort', 'name startDate endDate')
@@ -144,8 +163,8 @@ async function prepareInvoice(req, res, next) {
  */
 async function initiatePayment(req, res, next) {
   try {
-    let invoiceId = req.params.invoiceId || req.body.invoiceId;
-    const applicationId = req.body.applicationId;
+    let invoiceId = req.params?.invoiceId || req.body?.invoiceId;
+    const applicationId = req.body?.applicationId;
 
     if (!invoiceId && applicationId) {
       const inv = await Invoice.findOne({ application: applicationId });
@@ -302,174 +321,121 @@ async function adminGet(req, res, next) {
 }
 
 /**
- * Stripe Webhook Handler
+ * Gateway Webhook Callback Handler
  * POST /api/payments/webhook
- * Verifies cryptographic Stripe HMAC signature and idempotently confirms transaction.
+ * POST /api/payments/callback
+ * Verifies Paymob cryptographic HMAC-SHA512 signature and idempotently finalizes transaction.
  */
-async function handleStripeWebhook(req, res, next) {
-  const sig = req.headers['stripe-signature'];
-  if (!sig) {
-    return res.status(400).json({ error: 'Missing stripe-signature header.' });
-  }
+async function handleGatewayWebhook(req, res, next) {
+  // Paymob passes HMAC in query (for transaction callbacks) or in header
+  const hmac =
+    req.query?.hmac ||
+    req.headers['x-paymob-hmac'] ||
+    req.headers['hmac'] ||
+    req.headers['stripe-signature']; // fallback check for compatibility
 
-  if (!Buffer.isBuffer(req.rawBody)) {
-    console.error('[STRIPE WEBHOOK ERROR] req.rawBody is missing or not a buffer.');
-    return res.status(400).send('Webhook Error: raw body unavailable.');
+  if (!hmac) {
+    return res.status(400).json({ error: 'Missing HMAC signature for callback verification.' });
   }
 
   const { getPaymentProvider } = require('../services/paymentProviders');
-  const stripeProvider = getPaymentProvider('STRIPE');
+  const provider = getPaymentProvider('PAYMOB');
 
-  let event;
+  // Transaction payload can be nested in req.body.obj or req.body or req.query
+  const data = req.body?.obj || req.body || req.query;
+
+  let isValidHmac = false;
   try {
-    event = stripeProvider.constructWebhookEvent(req.rawBody, sig);
+    isValidHmac = provider.verifyWebhookHmac(data, hmac);
   } catch (err) {
-    console.error('[STRIPE WEBHOOK ERROR] Signature verification failed:', err.message);
+    console.error('[GATEWAY WEBHOOK ERROR] HMAC check error:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
+  if (!isValidHmac) {
+    console.error('[GATEWAY WEBHOOK ERROR] Cryptographic HMAC mismatch.');
+    return res.status(401).json({ success: false, message: 'Webhook Error: Invalid HMAC cryptographic signature.' });
+  }
+
   try {
-    switch (event.type) {
-      case 'checkout.session.completed': {
-        const session = event.data.object;
+    const orderId = String(data.order?.id !== undefined ? data.order.id : data['order.id'] || data.order || '');
+    const merchantTxId = data.merchant_order_id || data.order?.merchant_order_id;
+    const gatewayTxId = String(data.id || '');
 
-        // 1. Verify session mode & status
-        if (session.mode !== 'payment' || session.payment_status !== 'paid') {
-          console.warn(`[STRIPE WEBHOOK] Ignored un-settled session: ${session.id}, status: ${session.payment_status}`);
-          break;
-        }
-
-        // 2. Resolve transaction
-        let transactionId = session.metadata?.transactionId;
-        let tx = null;
-        if (transactionId) {
-          tx = await PaymentTransaction.findOne({ transactionId }).populate('invoice');
-        }
-        if (!tx) {
-          tx = await PaymentTransaction.findOne({ stripeCheckoutSessionId: session.id }).populate('invoice');
-        }
-
-        if (!tx) {
-          console.error(`[STRIPE WEBHOOK] Ignored: no transaction found for session ${session.id}`);
-          break;
-        }
-
-        // 3. Idempotency check: if already settled as Paid, acknowledge immediately
-        if (tx.status === 'Paid') {
-          break;
-        }
-
-        // 4. Verify currency matches authoritative transaction
-        const expectedCurrency = (tx.currency || 'EGP').toLowerCase();
-        if (String(session.currency || '').toLowerCase() !== expectedCurrency) {
-          console.error(`[STRIPE WEBHOOK] Currency mismatch for session ${session.id}: received ${session.currency}, expected ${expectedCurrency}`);
-          break;
-        }
-
-        // 5. Verify amount matches authoritative transaction amount in minor units
-        const expectedAmountMinor = Math.round(Number(tx.amount) * 100);
-        if (Number(session.amount_total) !== expectedAmountMinor) {
-          console.error(`[STRIPE WEBHOOK] Amount mismatch for session ${session.id}: received ${session.amount_total}, expected ${expectedAmountMinor}`);
-          break;
-        }
-
-        // 6. Verify student metadata matches transaction student
-        const txStudentId = tx.student?._id ? tx.student._id.toString() : tx.student?.toString();
-        if (session.metadata?.studentId && txStudentId && session.metadata.studentId !== txStudentId) {
-          console.error(`[STRIPE WEBHOOK] Student mismatch for session ${session.id}: metadata ${session.metadata.studentId} != ${txStudentId}`);
-          break;
-        }
-
-        // 7. Check if invoice was already Overdue/Expired/Cancelled (Late payment handling)
-        if (tx.invoice && ['Overdue', 'Expired', 'Cancelled'].includes(tx.invoice.status)) {
-          console.error(`[STRIPE WEBHOOK] REQUIRES MANUAL REFUND: Late payment received for ${tx.invoice.status} invoice ${tx.invoice._id}`);
-          tx.status = 'Requires_Refund';
-          tx.failureReason = `Late payment received after invoice ${tx.invoice.status}. Seat was released; manual financial reconciliation required.`;
-          tx.providerReference = typeof session.payment_intent === 'string'
-            ? session.payment_intent
-            : session.payment_intent?.id || session.id;
-          await tx.save();
-          break;
-        }
-
-        // 8. Atomically finalize payment and enrollment
-        await paymentService.verifyAndFinalizePayment({
-          transactionId: tx.transactionId,
-          verifiedSession: session,
-          providerReference: typeof session.payment_intent === 'string'
-            ? session.payment_intent
-            : session.payment_intent?.id || session.id,
-          webhookEventId: event.id,
-        });
-        break;
-      }
-
-      case 'checkout.session.expired': {
-        const session = event.data.object;
-        const tx = await PaymentTransaction.findOne({
-          $or: [
-            { stripeCheckoutSessionId: session.id },
-            { transactionId: session.metadata?.transactionId },
-          ],
-        }).populate('invoice');
-
-        if (tx && tx.status !== 'Paid') {
-          tx.status = 'Cancelled';
-          tx.failureReason = 'Checkout session expired (30-minute window).';
-          await tx.save();
-
-          // Revert invoice back to Pending so student can retry before the 72h deadline
-          if (tx.invoice && tx.invoice.status === 'Payment Initiated') {
-            tx.invoice.status = 'Pending';
-            await tx.invoice.save();
-          }
-        }
-        break;
-      }
-
-      case 'payment_intent.payment_failed': {
-        const intent = event.data.object;
-        const tx = await PaymentTransaction.findOne({
-          $or: [
-            { stripePaymentIntentId: intent.id },
-            { 'metadata.sessionToken': intent.id },
-          ],
-        }).populate('invoice');
-
-        if (tx && tx.status !== 'Paid') {
-          tx.status = 'Failed';
-          tx.failureReason = intent.last_payment_error?.message || 'Payment card declined by issuer.';
-          await tx.save();
-
-          // Revert invoice back to Pending so student can retry
-          if (tx.invoice && tx.invoice.status === 'Payment Initiated') {
-            tx.invoice.status = 'Pending';
-            await tx.invoice.save();
-          }
-
-          try {
-            const { notify } = require('../services/notificationService');
-            await notify({
-              recipient: tx.student,
-              title: 'Payment Attempt Declined',
-              message: `Your tuition payment of ${tx.amount} ${tx.currency} could not be processed: ${tx.failureReason}. You can retry before the 72-hour deadline.`,
-              type: 'warning',
-              relatedCourse: tx.invoice?.course,
-              relatedApplication: tx.invoice?.application,
-            });
-          } catch (_) {}
-        }
-        break;
-      }
-
-      default:
-        // Acknowledge other event types safely
-        break;
+    // Resolve transaction
+    let tx = null;
+    if (merchantTxId) {
+      tx = await PaymentTransaction.findOne({ transactionId: merchantTxId }).populate('invoice');
+    }
+    if (!tx && orderId) {
+      tx = await PaymentTransaction.findOne({
+        $or: [{ providerOrderId: orderId }, { providerReference: orderId }],
+      }).populate('invoice');
+    }
+    if (!tx && gatewayTxId) {
+      tx = await PaymentTransaction.findOne({ providerReference: gatewayTxId }).populate('invoice');
     }
 
-    res.json({ received: true, type: event.type });
+    if (!tx) {
+      console.warn(`[GATEWAY WEBHOOK] Ignored: no transaction found for order ${orderId} / tx ${gatewayTxId}`);
+      return res.json({ received: true, ignored: true, reason: 'transaction_not_found' });
+    }
+
+    // Idempotency: if already settled, return immediately
+    if (tx.status === 'Paid') {
+      return res.json({ received: true, status: 'already_settled' });
+    }
+
+    // Currency verification
+    const expectedCurrency = (tx.currency || 'EGP').toLowerCase();
+    const receivedCurrency = String(data.currency || '').toLowerCase();
+    if (receivedCurrency && receivedCurrency !== expectedCurrency) {
+      console.error(`[GATEWAY WEBHOOK] Currency mismatch: received ${receivedCurrency}, expected ${expectedCurrency}`);
+      return res.status(400).send('Currency mismatch.');
+    }
+
+    // Amount verification in cents
+    const expectedCents = Math.round(Number(tx.amount) * 100);
+    const receivedCents = Number(data.amount_cents);
+    if (receivedCents && receivedCents !== expectedCents) {
+      console.error(`[GATEWAY WEBHOOK] Amount mismatch: received ${receivedCents}, expected ${expectedCents}`);
+      return res.status(400).send('Amount mismatch.');
+    }
+
+    // Check if invoice was already Overdue/Expired/Cancelled (Late payment handling)
+    if (tx.invoice && ['Overdue', 'Expired', 'Cancelled'].includes(tx.invoice.status)) {
+      console.error(`[GATEWAY WEBHOOK] REQUIRES MANUAL REFUND: Late payment received for ${tx.invoice.status} invoice ${tx.invoice._id}`);
+      tx.status = 'Requires_Refund';
+      tx.failureReason = `Late payment received after invoice ${tx.invoice.status}. Seat was released; manual financial reconciliation required.`;
+      tx.providerReference = gatewayTxId || orderId;
+      await tx.save();
+      return res.json({ received: true, status: 'requires_refund' });
+    }
+
+    const isSuccess = data.success === true || data.success === 'true';
+
+    if (isSuccess) {
+      await paymentService.verifyAndFinalizePayment({
+        transactionId: tx.transactionId,
+        verifiedCallbackData: data,
+        providerReference: gatewayTxId || orderId,
+        providerPayload: data,
+      });
+      return res.json({ received: true, status: 'settled_successfully' });
+    } else {
+      tx.status = 'Failed';
+      tx.failureReason = data.data?.message || 'Payment declined by card gateway.';
+      await tx.save();
+
+      if (tx.invoice && tx.invoice.status === 'Payment Initiated') {
+        tx.invoice.status = 'Pending';
+        await tx.invoice.save();
+      }
+
+      return res.json({ received: true, status: 'marked_failed' });
+    }
   } catch (err) {
-    console.error('[STRIPE WEBHOOK HANDLER ERROR]:', err);
+    console.error('[GATEWAY WEBHOOK HANDLER ERROR]:', err);
     res.status(500).json({ error: 'Webhook processing error', details: err.message });
   }
 }
@@ -487,10 +453,13 @@ async function getPaymentSessionStatus(req, res, next) {
 
     const transaction = await PaymentTransaction.findOne({
       $or: [
-        { stripeCheckoutSessionId: sessionId },
-        { transactionId: sessionId },
+        { providerSessionId: sessionId },
+        { providerOrderId: sessionId },
         { providerReference: sessionId },
+        { transactionId: sessionId },
+        { stripeCheckoutSessionId: sessionId },
         { 'metadata.sessionToken': sessionId },
+        { 'metadata.paymentKey': sessionId },
       ],
     })
       .populate({ path: 'invoice', populate: [{ path: 'course' }, { path: 'cohort' }] })
@@ -506,12 +475,12 @@ async function getPaymentSessionStatus(req, res, next) {
       throw new AppError('Forbidden: you cannot access another user payment session.', 403);
     }
 
-    // If transaction is still initiated/pending, and provider is Stripe, attempt live verification
-    if (transaction.status !== 'Paid' && transaction.provider === 'STRIPE') {
+    // If transaction is still initiated/pending, attempt live verification with provider
+    if (transaction.status !== 'Paid') {
       try {
         const { getPaymentProvider } = require('../services/paymentProviders');
-        const stripeProvider = getPaymentProvider('STRIPE');
-        const verifyRes = await stripeProvider.verifyPayment({
+        const provider = getPaymentProvider(transaction.provider || 'PAYMOB');
+        const verifyRes = await provider.verifyPayment({
           transactionId: transaction.transactionId,
           transaction,
           invoice: transaction.invoice,
@@ -559,6 +528,181 @@ async function getPaymentSessionStatus(req, res, next) {
   }
 }
 
+/**
+ * Student: Get masked refund account destination.
+ * GET /api/payments/refund-account
+ */
+async function getRefundAccount(req, res, next) {
+  try {
+    const acc = await paymentService.getStudentRefundAccount(req.user._id);
+    res.json({
+      success: true,
+      data: {
+        accountHolderName: acc?.accountHolderName,
+        refundMethod: acc?.refundMethod,
+        bankName: acc?.bankName,
+        maskedAccount: acc?.accountNumberMasked,
+        maskedIban: acc?.ibanMasked,
+        swiftCode: acc?.swiftCode,
+        isConfirmed: acc?.isConfirmed,
+        confirmedAt: acc?.confirmedAt,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Student: Save / Update refund destination.
+ * POST /api/payments/refund-account
+ */
+async function saveRefundAccount(req, res, next) {
+  try {
+    const { accountHolderName, refundMethod, bankName, accountNumber, iban, swiftCode } = req.body;
+    const acc = await paymentService.saveStudentRefundAccount({
+      studentId: req.user._id,
+      accountHolderName,
+      refundMethod,
+      bankName,
+      accountNumber,
+      iban,
+      swiftCode,
+      actorId: req.user._id,
+    });
+
+    res.json({
+      success: true,
+      message: 'Refund destination saved securely under EGSA Academy financial policy.',
+      data: {
+        accountHolderName: acc.accountHolderName,
+        refundMethod: acc.refundMethod,
+        bankName: acc.bankName,
+        maskedAccount: acc.accountNumberMasked,
+        maskedIban: acc.ibanMasked,
+        swiftCode: acc.swiftCode,
+        isConfirmed: acc.isConfirmed,
+        confirmedAt: acc.confirmedAt,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Student: Submit a refund request.
+ * POST /api/payments/invoices/:invoiceId/refund-request
+ */
+async function requestRefund(req, res, next) {
+  try {
+    const { amount, reason } = req.body;
+    const refundReq = await paymentService.requestRefund({
+      invoiceId: req.params.invoiceId,
+      studentId: req.user._id,
+      amount,
+      reason,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Refund request submitted successfully. It is now pending administrative review.',
+      data: refundReq,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Student: List my refund requests.
+ * GET /api/payments/my-refunds
+ */
+async function myRefunds(req, res, next) {
+  try {
+    const refunds = await paymentService.listStudentRefunds(req.user._id);
+    res.json({ success: true, data: refunds });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Admin: List all platform refund requests.
+ * GET /api/admin/refunds
+ */
+async function adminListRefunds(req, res, next) {
+  try {
+    const refunds = await paymentService.adminListRefunds(req.query);
+    res.json({ success: true, data: refunds });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Admin: Get single refund request audit details.
+ * GET /api/admin/refunds/:id
+ */
+async function adminGetRefund(req, res, next) {
+  try {
+    const refund = await paymentService.adminGetRefundDetails(req.params.id);
+    res.json({ success: true, data: refund });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Admin: Review, approve, or reject refund request.
+ * PATCH /api/admin/refunds/:id/review
+ */
+async function adminReviewRefund(req, res, next) {
+  try {
+    const { decision, decisionNote, approvedAmount } = req.body;
+    const result = await paymentService.adminReviewRefund({
+      refundRequestId: req.params.id,
+      adminId: req.user._id,
+      decision,
+      decisionNote,
+      approvedAmount,
+    });
+
+    res.json({
+      success: true,
+      message: `Refund request successfully ${decision.toLowerCase()}.`,
+      data: result,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Admin: Execute and process approved refund.
+ * POST /api/admin/refunds/:id/process
+ */
+async function adminProcessRefund(req, res, next) {
+  try {
+    const { settlementMethod, manualReference, notes } = req.body;
+    const result = await paymentService.adminProcessRefund({
+      refundRequestId: req.params.id,
+      adminId: req.user._id,
+      settlementMethod,
+      manualReference,
+      notes,
+    });
+
+    res.json({
+      success: true,
+      message: 'Refund settled and finalized successfully.',
+      data: result,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   myPayments,
   getInvoiceDetails,
@@ -569,6 +713,16 @@ module.exports = {
   payInvoice,
   adminList,
   adminGet,
-  handleStripeWebhook,
+  handleGatewayWebhook,
+  handleStripeWebhook: handleGatewayWebhook, // Backward-compatible alias
   getPaymentSessionStatus,
+  getRefundAccount,
+  saveRefundAccount,
+  requestRefund,
+  myRefunds,
+  adminListRefunds,
+  adminGetRefund,
+  adminReviewRefund,
+  adminProcessRefund,
 };
+

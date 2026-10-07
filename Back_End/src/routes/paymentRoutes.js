@@ -24,11 +24,21 @@ router.post('/:invoiceId/initiate', protect, ctrl.initiatePayment);
 // Student: Verify gateway payment and finalize enrollment
 router.post('/verify', protect, ctrl.verifyPayment);
 
-// Gateway Webhook: Cryptographically verified Stripe webhook (unprotected, called by Stripe)
-router.post('/webhook', ctrl.handleStripeWebhook);
+// Gateway Webhook / Transaction Callback: Cryptographically verified Paymob HMAC callback
+router.post('/webhook', ctrl.handleGatewayWebhook);
+router.post('/callback', ctrl.handleGatewayWebhook);
+router.get('/callback', ctrl.handleGatewayWebhook);
 
-// Student: Query session payment status (e.g. after return from Stripe checkout)
+// Student: Query session payment status (e.g. after return from Paymob checkout)
 router.get('/session-status/:sessionId', protect, ctrl.getPaymentSessionStatus);
+
+// Student: Refund Account Details (register, view masked destination)
+router.get('/refund-account', protect, ctrl.getRefundAccount);
+router.post('/refund-account', protect, ctrl.saveRefundAccount);
+
+// Student: Refund Requests
+router.post('/invoices/:invoiceId/refund-request', protect, ctrl.requestRefund);
+router.get('/my-refunds', protect, ctrl.myRefunds);
 
 // Administrative offline payment settlement (cash/wire recorded by cashier)
 router.post('/:invoiceId/pay', protect, authorize('admin', 'superadmin'), validate(payInvoiceValidator), ctrl.payInvoice);

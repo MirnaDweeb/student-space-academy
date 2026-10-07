@@ -1,5 +1,6 @@
 const Course = require('../models/Course');
 const StudentProfile = require('../models/StudentProfile');
+const ReadinessQuestion = require('../models/ReadinessQuestion');
 const { checkCourseFit } = require('../services/eligibilityService');
 const { AppError } = require('../middleware/error');
 
@@ -38,7 +39,16 @@ async function getCourse(req, res, next) {
       .populate('mandatoryPrerequisites', 'title slug level')
       .populate('recommendedPreviousCourses', 'title slug level');
     if (!course) throw new AppError('Course not found.', 404);
-    res.json({ success: true, data: course });
+    let hasCustomReadinessQuestions = false;
+    try {
+      hasCustomReadinessQuestions = !!(await ReadinessQuestion.exists({ course: course._id, isDefault: { $ne: true } }));
+    } catch (_) {
+      hasCustomReadinessQuestions = false;
+    }
+    const courseObj = typeof course.toObject === 'function' ? course.toObject() : { ...course };
+    courseObj.hasCustomReadinessQuestions = hasCustomReadinessQuestions;
+    courseObj.hasReadinessQuestions = true;
+    res.json({ success: true, data: courseObj });
   } catch (err) {
     next(err);
   }

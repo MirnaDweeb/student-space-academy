@@ -38,14 +38,48 @@ export default function CourseFitPage() {
 
   useEffect(load, [id]);
 
+  const handleDirectEnroll = async () => {
+    setApplying(true);
+    try {
+      const res = await applicationService.create({ courseId: id, directEnroll: true });
+      const app = res.data;
+      const invId = res.invoice?._id || app?.invoice?._id || app?.invoice;
+      if (app && ['Accepted', 'Eligible - Payment Pending'].includes(app.status)) {
+        if (invId) {
+          navigate(`/student/payments?invoiceId=${invId}&applicationId=${app._id}`);
+        } else {
+          navigate(`/student/payments?applicationId=${app._id}`);
+        }
+      } else if (app) {
+        navigate(`/student/applications/${app._id}`);
+      } else {
+        navigate('/student/applications');
+      }
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to process direct enrollment.');
+    } finally {
+      setApplying(false);
+    }
+  };
+
   const handleApplyOrAssess = async () => {
     if (fit.result === 'Foundation Required') {
       setApplying(true);
-      await applicationService.create({ courseId: id });
-      setApplying(false);
-      navigate('/student/applications');
+      try {
+        await applicationService.create({ courseId: id });
+        navigate('/student/applications');
+      } catch (err) {
+        setError(err.response?.data?.message || 'Failed to submit application.');
+      } finally {
+        setApplying(false);
+      }
       return;
     }
+
+    if (!fit.requiresReadiness) {
+      return handleDirectEnroll();
+    }
+
     navigate(`/student/readiness/start?courseId=${id}`);
   };
 
@@ -106,25 +140,46 @@ export default function CourseFitPage() {
             </div>
           </div>
 
-          <div className="d-flex justify-content-between align-items-center">
+          <div className="d-flex justify-content-between align-items-center flex-wrap gap-2">
             <Link to="/student/programs" className="btn btn-outline-secondary btn-sm">
               <i className="fa-solid fa-arrow-left me-1"></i> Browse Other Courses
             </Link>
 
             {fit.result !== 'Not Eligible' && (
-              <button
-                className="btn btn-primary px-4"
-                onClick={handleApplyOrAssess}
-                disabled={applying}
-              >
+              <div className="d-flex align-items-center gap-2">
                 {fit.result === 'Foundation Required' ? (
-                  applying ? 'Submitting…' : 'Apply to Recommended Foundation'
+                  <button
+                    className="btn btn-warning px-4"
+                    onClick={handleApplyOrAssess}
+                    disabled={applying}
+                  >
+                    {applying ? 'Submitting…' : 'Apply to Recommended Foundation'}
+                  </button>
                 ) : (
                   <>
-                    Continue to Readiness Assessment <i className="fa-solid fa-arrow-right ms-1"></i>
+                    <button
+                      className="btn btn-primary px-3 fw-bold"
+                      onClick={handleDirectEnroll}
+                      disabled={applying}
+                    >
+                      {applying ? 'Reserving…' : (
+                        <>
+                          <i className="fa-solid fa-credit-card me-1"></i> Enroll & Pay Now
+                        </>
+                      )}
+                    </button>
+                    {fit.requiresReadiness && (
+                      <button
+                        className="btn btn-outline-primary px-3 fw-semibold"
+                        onClick={handleApplyOrAssess}
+                        disabled={applying}
+                      >
+                        Check Readiness First <i className="fa-solid fa-arrow-right ms-1"></i>
+                      </button>
+                    )}
                   </>
                 )}
-              </button>
+              </div>
             )}
           </div>
         </div>

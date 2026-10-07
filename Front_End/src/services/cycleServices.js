@@ -1,7 +1,9 @@
 import api from './api';
 
 export const readinessService = {
-  start: (courseId) => api.post('/readiness/start', { courseId }).then((r) => r.data),
+  start: (courseId, options = {}) => api.post('/readiness/start', { courseId, ...options }).then((r) => r.data),
+  getAttempt: (attemptId) => api.get(`/readiness/${attemptId}`).then((r) => r.data),
+  status: (courseId) => api.get(`/readiness/status/${courseId}`).then((r) => r.data),
   submit: (attemptId, answers) => api.post(`/readiness/${attemptId}/submit`, { answers }).then((r) => r.data),
   result: (attemptId) => api.get(`/readiness/${attemptId}/result`).then((r) => r.data),
   // Admin Question Authoring
@@ -15,6 +17,7 @@ export const applicationService = {
   create: (payload) => api.post('/applications', payload).then((r) => r.data),
   my: () => api.get('/applications/my').then((r) => r.data),
   get: (id) => api.get(`/applications/${id}`).then((r) => r.data),
+  directEnroll: (id, payload = {}) => api.post(`/applications/${id}/direct-enroll`, payload).then((r) => r.data),
   cancel: (id) => api.patch(`/applications/${id}/cancel`).then((r) => r.data),
 };
 
@@ -31,6 +34,12 @@ export const paymentService = {
     const body = typeof payload === 'string' ? { method: payload } : payload;
     return api.post(`/payments/${invoiceId}/pay`, body).then((r) => r.data);
   },
+  // Refund Management (Student)
+  getRefundAccount: () => api.get('/payments/refund-account').then((r) => r.data),
+  saveRefundAccount: (payload) => api.post('/payments/refund-account', payload).then((r) => r.data),
+  requestRefund: (invoiceId, payload) =>
+    api.post(`/payments/invoices/${invoiceId}/refund-request`, payload).then((r) => r.data),
+  myRefunds: () => api.get('/payments/my-refunds').then((r) => r.data),
 };
 
 export const adminService = {
@@ -44,6 +53,11 @@ export const adminService = {
   // Payment management
   payments: (params) => api.get('/admin/payments', { params }).then((r) => r.data),
   paymentDetails: (id) => api.get(`/admin/payments/${id}`).then((r) => r.data),
+  // Refund management
+  refunds: (params) => api.get('/admin/refunds', { params }).then((r) => r.data),
+  refundDetails: (id) => api.get(`/admin/refunds/${id}`).then((r) => r.data),
+  reviewRefund: (id, payload) => api.patch(`/admin/refunds/${id}/review`, payload).then((r) => r.data),
+  processRefund: (id, payload) => api.post(`/admin/refunds/${id}/process`, payload).then((r) => r.data),
   // Certificate management
   certificates: (params) => api.get('/admin/certificates', { params }).then((r) => r.data),
   certificateDetails: (id) => api.get(`/admin/certificates/${id}`).then((r) => r.data),

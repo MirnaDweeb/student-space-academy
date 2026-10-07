@@ -2,7 +2,8 @@ const mongoose = require('mongoose');
 
 const ReadinessQuestionSchema = new mongoose.Schema(
   {
-    course: { type: mongoose.Schema.Types.ObjectId, ref: 'Course', required: true },
+    course: { type: mongoose.Schema.Types.ObjectId, ref: 'Course', required: false, default: null },
+    isDefault: { type: Boolean, default: false },
     question: { type: String, required: true },
     options: [{ type: String, required: true }],
     correctAnswerIndex: { type: Number, required: true },

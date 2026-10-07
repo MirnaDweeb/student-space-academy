@@ -23,33 +23,47 @@ async function scoreAttempt(attempt, course) {
     .filter(([, stat]) => stat.correct / stat.total < 0.6)
     .map(([topic]) => topic);
 
-  const minScore = course.minReadinessScore || 60;
-  const borderline = score >= minScore - 15;
+  const isThreeTier =
+    course.scoringPolicy === 'THREE_TIER' ||
+    course.slug === 'crossfit-functional-fitness-program' ||
+    /crossfit/i.test(course.title || '');
 
   let outcome;
-  if (score >= minScore && knowledgeGaps.length === 0) {
-    outcome = 'READY';
-  } else if (knowledgeGaps.length === 0 && borderline) {
-    // No specific topic gap identified, but overall score is a bit under the bar.
-    outcome = 'CONDITIONALLY_READY';
-  } else if (knowledgeGaps.length === 1 && borderline) {
-    // A single identified gap and an otherwise acceptable score: still fixable quickly.
-    outcome = 'CONDITIONALLY_READY';
-  } else if (knowledgeGaps.length >= 1) {
-    // One or more confirmed knowledge gaps outside the borderline case:
-    // knowledge gaps take priority over the raw score, same as the
-    // mandatory-prerequisite rule takes priority over readiness in eligibilityService.
-    outcome = 'FOUNDATION_REQUIRED';
+  if (isThreeTier) {
+    if (score >= 80) {
+      outcome = 'READY';
+    } else if (score >= 50) {
+      outcome = 'FOUNDATION_REQUIRED';
+    } else {
+      outcome = 'MANUAL_REVIEW';
+    }
   } else {
-    outcome = 'MANUAL_REVIEW';
+    const minScore = course.minReadinessScore || 60;
+    const borderline = score >= minScore - 15;
+
+    if (score >= minScore && knowledgeGaps.length === 0) {
+      outcome = 'READY';
+    } else if (knowledgeGaps.length === 0 && borderline) {
+      // No specific topic gap identified, but overall score is a bit under the bar.
+      outcome = 'CONDITIONALLY_READY';
+    } else if (knowledgeGaps.length === 1 && borderline) {
+      // A single identified gap and an otherwise acceptable score: still fixable quickly.
+      outcome = 'CONDITIONALLY_READY';
+    } else if (knowledgeGaps.length >= 1) {
+      // One or more confirmed knowledge gaps outside the borderline case:
+      // knowledge gaps take priority over the raw score
+      outcome = 'FOUNDATION_REQUIRED';
+    } else {
+      outcome = 'MANUAL_REVIEW';
+    }
   }
 
   let recommendedCourse = null;
-  if (outcome === 'FOUNDATION_REQUIRED' || outcome === 'CONDITIONALLY_READY') {
+  if ((outcome === 'FOUNDATION_REQUIRED' || outcome === 'CONDITIONALLY_READY') && Array.isArray(course?.recommendedPreviousCourses) && course.recommendedPreviousCourses.length > 0) {
     const candidates = await Course.find({
-      _id: { $in: course.recommendedPreviousCourses || [] },
+      _id: { $in: course.recommendedPreviousCourses },
     });
-    recommendedCourse = candidates[0] || null;
+    recommendedCourse = (candidates && candidates[0]) || null;
   }
 
   return { score, knowledgeGaps, outcome, recommendedCourse, topicStats };

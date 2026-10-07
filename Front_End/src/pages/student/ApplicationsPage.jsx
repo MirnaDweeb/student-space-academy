@@ -230,13 +230,29 @@ export default function ApplicationsPage() {
                   {/* Actions Column */}
                   <div className="d-flex flex-wrap align-items-center gap-2 w-100 w-md-auto justify-content-md-end">
                     {(app.status === 'Accepted' || app.status === 'Eligible - Payment Pending') && (
-                      <Link to="/student/payments" className="btn btn-primary btn-sm">
-                        <i className="fa-solid fa-credit-card me-1"></i> Choose Package & Pay
+                      <Link
+                        to={`/student/payments?invoiceId=${app.invoice?._id || (typeof app.invoice === 'string' ? app.invoice : '')}&applicationId=${app._id}`}
+                        className="btn btn-primary btn-sm"
+                      >
+                        {app.invoice?.status === 'Payment Initiated' ? (
+                          <>
+                            <i className="fa-solid fa-spinner fa-spin me-1"></i> Continue Payment
+                          </>
+                        ) : (
+                          <>
+                            <i className="fa-solid fa-credit-card me-1"></i> Pay Now
+                          </>
+                        )}
                       </Link>
                     )}
                     {app.status === 'Readiness Required' && (
                       <Link to={`/student/readiness/start?courseId=${app.course?._id}`} className="btn btn-primary btn-sm">
                         <i className="fa-solid fa-pen-to-square me-1"></i> Take Readiness
+                      </Link>
+                    )}
+                    {app.status === 'Foundation Recommended' && (
+                      <Link to={`/student/applications/${app._id}/foundation`} className="btn btn-warning text-dark btn-sm fw-semibold">
+                        <i className="fa-solid fa-graduation-cap me-1"></i> Review Foundation Request
                       </Link>
                     )}
                     {app.status === 'Confirmed' && (

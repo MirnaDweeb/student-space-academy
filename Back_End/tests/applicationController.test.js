@@ -3,6 +3,9 @@ jest.mock('../src/models/Course');
 jest.mock('../src/models/Cohort');
 jest.mock('../src/models/StudentProfile');
 jest.mock('../src/models/ReadinessAttempt');
+jest.mock('../src/models/Invoice');
+jest.mock('../src/models/Enrollment');
+jest.mock('../src/models/User');
 jest.mock('../src/services/eligibilityService');
 jest.mock('../src/services/paymentService');
 jest.mock('../src/services/notificationService');
@@ -10,6 +13,9 @@ jest.mock('../src/services/notificationService');
 const Application = require('../src/models/Application');
 const Course = require('../src/models/Course');
 const Cohort = require('../src/models/Cohort');
+const Invoice = require('../src/models/Invoice');
+const Enrollment = require('../src/models/Enrollment');
+const User = require('../src/models/User');
 const StudentProfile = require('../src/models/StudentProfile');
 const ReadinessAttempt = require('../src/models/ReadinessAttempt');
 const { checkCourseFit } = require('../src/services/eligibilityService');
@@ -29,7 +35,15 @@ function baseSetup({ cohort, reservedResult }) {
   ReadinessAttempt.findOne.mockResolvedValue({ _id: 'attempt-1', outcome: 'READY' });
   Cohort.findOne.mockReturnValue({ sort: jest.fn().mockResolvedValue(cohort) });
   Cohort.findOneAndUpdate.mockResolvedValue(reservedResult);
-  Application.create.mockImplementation((doc) => Promise.resolve({ _id: 'app-1', ...doc }));
+  Application.create.mockImplementation((doc) =>
+    Promise.resolve({
+      _id: 'app-1',
+      ...doc,
+      save: jest.fn().mockResolvedValue(true),
+    })
+  );
+  Invoice.findOne = jest.fn().mockResolvedValue(null);
+  User.findById = jest.fn().mockResolvedValue({ email: 'test@example.com', fullName: 'Test Student' });
   issueInvoice.mockResolvedValue({ _id: 'invoice-1' });
   notify.mockResolvedValue({});
   return course;
@@ -38,9 +52,9 @@ function baseSetup({ cohort, reservedResult }) {
 describe('createApplication - admissions lifecycle enforcement', () => {
   afterEach(() => jest.clearAllMocks());
 
-  test('creates an application with status Submitted without prematurely reserving seats or issuing invoices', async () => {
+  test('creates an application with automatic acceptance, atomic seat reservation, and invoice issuance for eligible candidates', async () => {
     const cohort = { _id: 'cohort-1', capacity: 30, seatsTaken: 10 };
-    baseSetup({ cohort, reservedResult: null });
+    baseSetup({ cohort, reservedResult: { _id: 'cohort-1', seatsTaken: 11 } });
 
     const req = { body: { courseId: 'course-1', readinessAttemptId: 'attempt-1' }, user: { _id: 'student-1' } };
     const res = mockRes();
@@ -49,17 +63,28 @@ describe('createApplication - admissions lifecycle enforcement', () => {
     await createApplication(req, res, next);
 
     expect(next).not.toHaveBeenCalled();
-    // Seats are NOT reserved on submission; they are reserved upon Admin review & seat allocation
-    expect(Cohort.findOneAndUpdate).not.toHaveBeenCalled();
-    // Invoices are NOT issued on submission; issued upon Acceptance
-    expect(issueInvoice).not.toHaveBeenCalled();
-    expect(Application.create).toHaveBeenCalledWith(
+    // Direct admission: atomically reserve seat and issue invoice
+    expect(Cohort.findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: 'cohort-1', $expr: { $lt: ['$seatsTaken', '$capacity'] } },
+      { $inc: { seatsTaken: 1 } },
+      { new: true }
+    );
+    expect(issueInvoice).toHaveBeenCalledWith(
       expect.objectContaining({
-        status: 'Submitted',
-        eligibilityStatus: 'Eligible',
+        student: 'student-1',
+        course: expect.objectContaining({ _id: 'course-1' }),
       })
     );
     expect(res.status).toHaveBeenCalledWith(201);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        data: expect.objectContaining({
+          status: 'Accepted',
+          eligibilityStatus: 'Eligible',
+        }),
+      })
+    );
   });
 
   test('sets eligibilityStatus to Not Started when no readiness attempt is provided and course has assessment', async () => {

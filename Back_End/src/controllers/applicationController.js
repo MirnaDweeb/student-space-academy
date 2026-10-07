@@ -7,6 +7,7 @@ const ReadinessQuestion = require('../models/ReadinessQuestion');
 const Invoice = require('../models/Invoice');
 const Enrollment = require('../models/Enrollment');
 const { checkCourseFit } = require('../services/eligibilityService');
+const { autoAcceptAndReserveSeat } = require('../services/admissionService');
 const { issueInvoice, processExpiredInvoices, releaseSeatAndPromoteWaitlist } = require('../services/paymentService');
 const { notify } = require('../services/notificationService');
 const { sendApplicationSubmittedEmail } = require('../utils/email');
@@ -14,7 +15,8 @@ const { AppError } = require('../middleware/error');
 
 async function createApplication(req, res, next) {
   try {
-    const { courseId, readinessAttemptId } = req.body;
+    const { courseId, readinessAttemptId, directEnroll } = req.body;
+    const isDirectEnroll = directEnroll === true;
     const course = await Course.findById(courseId);
     if (!course) throw new AppError('Course not found.', 404);
     if (course.price == null) {
@@ -23,6 +25,55 @@ async function createApplication(req, res, next) {
 
     const profile = await StudentProfile.findOne({ user: req.user._id });
     if (!profile) throw new AppError('Complete your profile first.', 400);
+
+    // Prevent duplicate active applications for the same student and course
+    let existingQuery = Application.findOne({
+      student: req.user._id,
+      course: course._id,
+      status: { $nin: ['Cancelled', 'Withdrawn', 'Rejected'] },
+    });
+    if (existingQuery && typeof existingQuery.sort === 'function') {
+      existingQuery = existingQuery.sort({ createdAt: -1 });
+    }
+    let existingActiveApp = await existingQuery;
+
+    if (existingActiveApp) {
+      if (readinessAttemptId && !existingActiveApp.readinessAttempt) {
+        existingActiveApp.readinessAttempt = readinessAttemptId;
+        await existingActiveApp.save();
+      }
+
+      // If student opts for direct enrollment, ensure eligibility is activated
+      if (isDirectEnroll && (course.directEnrollmentPermitted !== false || existingActiveApp.status !== 'Foundation Recommended') && existingActiveApp.status !== 'Manual Review') {
+        existingActiveApp.eligibilityStatus = 'Eligible';
+        if (existingActiveApp.status === 'Foundation Recommended' && course.directEnrollmentPermitted !== false) {
+          existingActiveApp.status = 'Submitted';
+        }
+        await existingActiveApp.save();
+      }
+
+      // Self-heal eligible application if pending review or opted for direct enrollment
+      let admissionRes = null;
+      if (existingActiveApp.eligibilityStatus === 'Eligible' && ['Under Review', 'Submitted', 'Draft'].includes(existingActiveApp.status)) {
+        admissionRes = await autoAcceptAndReserveSeat({ application: existingActiveApp, directEnroll: isDirectEnroll });
+        if (admissionRes?.application) {
+          existingActiveApp = admissionRes.application;
+        }
+      }
+
+      // Retrieve or attach active invoice
+      let invoice = admissionRes?.invoice || null;
+      if (!invoice && ['Accepted', 'Eligible - Payment Pending'].includes(existingActiveApp.status)) {
+        invoice = await Invoice.findOne({ application: existingActiveApp._id, status: { $ne: 'Cancelled' } });
+      }
+
+      return res.status(200).json({
+        success: true,
+        data: existingActiveApp,
+        invoice,
+        message: 'Active application already exists for this course.',
+      });
+    }
 
     const fit = await checkCourseFit(profile, course);
     if (fit.result === 'Foundation Required') {
@@ -36,6 +87,19 @@ async function createApplication(req, res, next) {
         submittedAt: new Date(),
       });
       return res.status(201).json({ success: true, data: application, message: 'Foundation course required before applying.' });
+    }
+
+    if (fit.result === 'Manual Review') {
+      const application = await Application.create({
+        student: req.user._id,
+        course: course._id,
+        status: 'Manual Review',
+        eligibilityStatus: 'In Progress',
+        statusHistory: [{ status: 'Manual Review', note: fit.reasons[0]?.message || 'Admissions committee manual review required.' }],
+        fitResultSnapshot: fit,
+        submittedAt: new Date(),
+      });
+      return res.status(201).json({ success: true, data: application, message: 'Application requires manual review by admissions committee.' });
     }
 
     let readinessAttempt = null;
@@ -64,28 +128,34 @@ async function createApplication(req, res, next) {
     let status = 'Submitted';
 
     if (readinessAttempt) {
-      if (readinessAttempt.outcome === 'FOUNDATION_REQUIRED') {
-        eligibilityStatus = 'Not Eligible';
-        status = 'Foundation Recommended';
-      } else if (['READY', 'CONDITIONALLY_READY'].includes(readinessAttempt.outcome)) {
+      if (['FOUNDATION_REQUIRED', 'FOUNDATION_RECOMMENDED'].includes(readinessAttempt.outcome)) {
+        if (isDirectEnroll || course.directEnrollmentPermitted === true) {
+          eligibilityStatus = 'Eligible';
+          status = isDirectEnroll ? 'Submitted' : 'Foundation Recommended';
+        } else {
+          eligibilityStatus = 'Not Eligible';
+          status = 'Foundation Recommended';
+        }
+      } else if (['READY', 'CONDITIONALLY_READY', 'ELIGIBLE'].includes(readinessAttempt.outcome)) {
         eligibilityStatus = 'Eligible';
         status = 'Submitted';
       } else {
         eligibilityStatus = 'In Progress';
-        status = 'Submitted';
+        status = 'Manual Review';
       }
     } else {
       const hasQuestions = await ReadinessQuestion.exists({ course: course._id });
-      if (hasQuestions) {
-        eligibilityStatus = 'Not Started';
+      if (isDirectEnroll || !hasQuestions || course.directEnrollmentPermitted === true) {
+        // Direct enrollment: assessment is optional!
+        eligibilityStatus = 'Eligible';
         status = 'Submitted';
       } else {
-        eligibilityStatus = 'Eligible';
+        eligibilityStatus = 'Not Started';
         status = 'Submitted';
       }
     }
 
-    const application = await Application.create({
+    let application = await Application.create({
       student: req.user._id,
       course: course._id,
       cohort: cohort ? cohort._id : undefined,
@@ -97,7 +167,7 @@ async function createApplication(req, res, next) {
       submittedAt: new Date(),
     });
 
-    // Dispatch institutional application acknowledgement email
+    // Always dispatch institutional application acknowledgement email upon registration
     try {
       await sendApplicationSubmittedEmail({
         to: req.user.email,
@@ -110,19 +180,42 @@ async function createApplication(req, res, next) {
       console.error('[EMAIL ERROR] Failed to send application submitted email:', emailErr.message);
     }
 
-    await notify({
-      recipient: req.user._id,
-      title: 'Application Submitted',
-      message: 'Your application has been received and is under processing.',
-      type: 'info',
-      relatedCourse: course._id,
-      relatedApplication: application._id,
-    });
+    // Direct Automatic Acceptance, Atomic Seat Reservation & Invoice Generation
+    let invoice = null;
+    if (eligibilityStatus === 'Eligible') {
+      const admissionRes = await autoAcceptAndReserveSeat({
+        application,
+        studentId: req.user._id,
+        courseId: course._id,
+        cohortId: cohort ? cohort._id : undefined,
+      });
+      if (admissionRes?.application) {
+        application = admissionRes.application;
+      }
+      invoice = admissionRes?.invoice || null;
+      if (!invoice && ['Accepted', 'Eligible - Payment Pending'].includes(application.status)) {
+        invoice = await Invoice.findOne({ application: application._id, status: { $ne: 'Cancelled' } });
+      }
+    } else {
+      await notify({
+        recipient: req.user._id,
+        title: 'Application Submitted',
+        message: 'Your application has been received and is under processing.',
+        type: 'info',
+        relatedCourse: course._id,
+        relatedApplication: application._id,
+      });
+    }
 
     res.status(201).json({
       success: true,
       data: application,
-      message: 'Application submitted successfully. Your application has been received and is under processing.',
+      invoice,
+      waitlisted: application.status === 'Waitlisted',
+      waitlistPosition: application.waitlistPosition,
+      message: application.status === 'Accepted'
+        ? 'Application automatically accepted and seat reserved. Payment is now available.'
+        : 'Application submitted successfully. Your application has been received and is under processing.',
     });
   } catch (err) {
     next(err);
@@ -132,11 +225,22 @@ async function createApplication(req, res, next) {
 async function myApplications(req, res, next) {
   try {
     await processExpiredInvoices();
-    const applications = await Application.find({ student: req.user._id })
+    const rawApplications = await Application.find({ student: req.user._id })
       .populate('course', 'title level price transportationPrice currency startDate')
       .populate('cohort')
       .populate('readinessAttempt')
       .sort({ createdAt: -1 });
+
+    // Self-heal eligible applications previously stuck in Under Review / Submitted
+    const applications = [];
+    for (const app of rawApplications) {
+      if (app.eligibilityStatus === 'Eligible' && ['Under Review', 'Submitted'].includes(app.status)) {
+        const healed = await autoAcceptAndReserveSeat({ application: app });
+        applications.push(healed?.application || app);
+      } else {
+        applications.push(app);
+      }
+    }
 
     const appIds = applications.map((a) => a._id);
     const [invoices, enrollments] = await Promise.all([
@@ -148,7 +252,7 @@ async function myApplications(req, res, next) {
     const enrMap = new Map(enrollments.map((enr) => [enr.application?.toString(), enr]));
 
     const enriched = applications.map((app) => {
-      const plain = app.toObject();
+      const plain = typeof app.toObject === 'function' ? app.toObject() : app;
       plain.invoice = invMap.get(app._id.toString()) || null;
       plain.enrollment = enrMap.get(app._id.toString()) || null;
       return plain;
@@ -162,11 +266,34 @@ async function myApplications(req, res, next) {
 
 async function getApplication(req, res, next) {
   try {
-    const application = await Application.findOne({ _id: req.params.id, student: req.user._id })
+    let application = await Application.findOne({ _id: req.params.id, student: req.user._id })
       .populate('course')
       .populate('cohort')
       .populate('readinessAttempt');
     if (!application) throw new AppError('Application not found.', 404);
+
+    // Self-heal eligible application stuck in Under Review / Submitted
+    if (application.eligibilityStatus === 'Eligible' && ['Under Review', 'Submitted'].includes(application.status)) {
+      const healed = await autoAcceptAndReserveSeat({ application });
+      if (healed?.application) {
+        application = healed.application;
+      }
+    }
+
+    // Attach or heal fitResultSnapshot if missing
+    if (!application.fitResultSnapshot) {
+      try {
+        const profile = await StudentProfile.findOne({ user: req.user._id });
+        if (profile && application.course) {
+          const fit = await checkCourseFit(profile, application.course);
+          application.fitResultSnapshot = fit;
+          if (application.course?.directEnrollmentPermitted !== false && fit?.result === 'Eligible' && application.eligibilityStatus === 'Not Eligible') {
+            application.eligibilityStatus = 'Eligible';
+          }
+          await application.save();
+        }
+      } catch (_) {}
+    }
 
     const [invoice, enrollment] = await Promise.all([
       Invoice.findOne({ application: application._id, student: req.user._id }),
@@ -176,7 +303,7 @@ async function getApplication(req, res, next) {
     res.json({
       success: true,
       data: {
-        ...application.toObject(),
+        ...(typeof application.toObject === 'function' ? application.toObject() : application),
         invoice: invoice || null,
         enrollment: enrollment || null,
       },
@@ -245,4 +372,51 @@ async function cancelApplication(req, res, next) {
   }
 }
 
-module.exports = { createApplication, myApplications, getApplication, cancelApplication };
+async function directEnrollApplication(req, res, next) {
+  try {
+    const application = await Application.findOne({
+      _id: req.params.id,
+      student: req.user._id,
+    }).populate('course');
+
+    if (!application) throw new AppError('Application not found.', 404);
+
+    const course = application.course;
+    if (!course) throw new AppError('Course not found.', 404);
+
+    if (course.directEnrollmentPermitted === false) {
+      throw new AppError('Direct enrollment is not permitted for this program. Mandatory readiness completion required.', 400);
+    }
+
+    application.eligibilityStatus = 'Eligible';
+    if (['Foundation Recommended', 'Draft', 'Submitted', 'Under Review'].includes(application.status)) {
+      application.status = 'Submitted';
+    }
+    await application.save();
+
+    const admissionRes = await autoAcceptAndReserveSeat({
+      application,
+      studentId: req.user._id,
+      courseId: course._id,
+      directEnroll: true,
+      packageType: req.body?.packageType || application.selectedPackage || 'WITHOUT_TRANSPORTATION',
+    });
+
+    res.json({
+      success: true,
+      data: admissionRes?.application || application,
+      invoice: admissionRes?.invoice || null,
+      message: 'Direct enrollment processed successfully. Seat reserved.',
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = {
+  createApplication,
+  myApplications,
+  getApplication,
+  cancelApplication,
+  directEnrollApplication,
+};

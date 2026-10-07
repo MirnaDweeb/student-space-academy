@@ -1,13 +1,16 @@
 const MockPaymentProvider = require('./MockPaymentProvider');
-const StripePaymentProvider = require('./StripePaymentProvider');
+const PaymobPaymentProvider = require('./PaymobPaymentProvider');
 
 const providers = {
   DEVELOPMENT_MOCK: new MockPaymentProvider(),
-  STRIPE: new StripePaymentProvider(),
+  PAYMOB: new PaymobPaymentProvider(),
 };
 
 function getPaymentProvider(providerName) {
-  const selected = providerName || process.env.PAYMENT_PROVIDER || (process.env.STRIPE_SECRET_KEY ? 'STRIPE' : 'DEVELOPMENT_MOCK');
+  const selected =
+    providerName ||
+    process.env.PAYMENT_PROVIDER ||
+    (process.env.PAYMOB_API_KEY ? 'PAYMOB' : 'DEVELOPMENT_MOCK');
   if (providers[selected]) {
     return providers[selected];
   }
@@ -18,5 +21,5 @@ function getPaymentProvider(providerName) {
 module.exports = {
   getPaymentProvider,
   MockPaymentProvider,
-  StripePaymentProvider,
+  PaymobPaymentProvider,
 };

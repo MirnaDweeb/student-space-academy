@@ -321,7 +321,7 @@ async function seed() {
       currency: 'EGP',
       method: 'Card',
       transactionId: 'TXN_CIRCUIT_DEMO_01',
-      provider: 'STRIPE',
+      provider: 'PAYMOB',
       isMock: false,
       status: 'Paid',
       paymentDate: new Date(Date.now() - 12 * 86400000),
@@ -542,7 +542,7 @@ async function seed() {
       currency: 'EGP',
       method: 'Card',
       transactionId: 'TXN_ROBOTICS_DEMO_02',
-      provider: 'STRIPE',
+      provider: 'PAYMOB',
       isMock: false,
       status: 'Paid',
       paymentDate: new Date(Date.now() - 4 * 86400000),
@@ -924,6 +924,14 @@ async function seed() {
       ],
     });
   }
+
+  // Seed official CrossFit & Functional Fitness Program and Readiness Questions
+  const { ensureCrossfitCourse } = require('../services/crossfitInitService');
+  await ensureCrossfitCourse();
+
+  // Seed shared/default readiness assessment questions
+  const { ensureDefaultReadinessQuestions } = require('../services/defaultReadinessInitService');
+  await ensureDefaultReadinessQuestions();
 
   console.log('[SEED] Done.');
   console.log('----------------------------------------------------');

@@ -43,4 +43,11 @@ router.patch('/certificates/:id/correct-name', certCtrl.correctName);
 router.get('/payments', paymentCtrl.adminList);
 router.get('/payments/:id', paymentCtrl.adminGet);
 
+// Refund Management Queue
+router.get('/refunds', paymentCtrl.adminListRefunds);
+router.get('/refunds/:id', paymentCtrl.adminGetRefund);
+router.patch('/refunds/:id/review', paymentCtrl.adminReviewRefund);
+router.post('/refunds/:id/process', paymentCtrl.adminProcessRefund);
+
 module.exports = router;
+

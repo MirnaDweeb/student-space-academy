@@ -2,22 +2,120 @@ const ReadinessQuestion = require('../models/ReadinessQuestion');
 const ReadinessAttempt = require('../models/ReadinessAttempt');
 const Course = require('../models/Course');
 const Application = require('../models/Application');
+const Invoice = require('../models/Invoice');
 const { scoreAttempt } = require('../services/readinessService');
+const { autoAcceptAndReserveSeat } = require('../services/admissionService');
 const { notify } = require('../services/notificationService');
 const { AppError } = require('../middleware/error');
 
+/**
+ * Resolve questions for a course:
+ * 1. Course-specific questions if configured
+ * 2. Shared default questions fallback
+ */
+async function getQuestionsForCourse(course) {
+  // 1. Try to find course-specific custom questions
+  let questions = await ReadinessQuestion.aggregate([
+    { $match: { course: course._id, isDefault: { $ne: true } } },
+    { $sample: { size: 12 } },
+  ]);
+
+  // Auto-ensure CrossFit readiness bank if accessing CrossFit course
+  if (questions.length === 0 && (course.slug === 'crossfit-functional-fitness-program' || /crossfit/i.test(course.title))) {
+    try {
+      const { ensureCrossfitCourse } = require('../services/crossfitInitService');
+      await ensureCrossfitCourse();
+      questions = await ReadinessQuestion.aggregate([
+        { $match: { course: course._id, isDefault: { $ne: true } } },
+        { $sample: { size: 12 } },
+      ]);
+    } catch (seedErr) {
+      console.error('[CROSSFIT SEED ERROR]', seedErr);
+    }
+  }
+
+  // 2. Fallback to shared/default readiness question bank
+  if (questions.length === 0) {
+    try {
+      const { ensureDefaultReadinessQuestions } = require('../services/defaultReadinessInitService');
+      await ensureDefaultReadinessQuestions();
+
+      questions = await ReadinessQuestion.aggregate([
+        { $match: { $or: [{ course: null }, { isDefault: true }] } },
+        { $sample: { size: 12 } },
+      ]);
+    } catch (defaultErr) {
+      console.error('[DEFAULT READINESS ERROR]', defaultErr);
+    }
+  }
+
+  // 3. Fallback to any default questions if aggregate returned empty
+  if (questions.length === 0) {
+    questions = await ReadinessQuestion.find({ isDefault: true }).limit(12);
+  }
+
+  return questions;
+}
+
 async function startAssessment(req, res, next) {
   try {
-    const { courseId } = req.body;
+    const courseId = req.body?.courseId || req.query?.courseId;
+    if (!courseId) throw new AppError('Course ID is required.', 400);
+
     const course = await Course.findById(courseId);
     if (!course) throw new AppError('Course not found.', 404);
 
-    const questions = await ReadinessQuestion.aggregate([
-      { $match: { course: course._id } },
-      { $sample: { size: 10 } },
-    ]);
+    const retake = req.body?.retake === true || req.query?.retake === 'true';
 
-    if (questions.length === 0) throw new AppError('No readiness questions configured for this course yet.', 400);
+    // Requirement 9: Prevent duplicate active attempts (resume if in-progress)
+    if (!retake && typeof ReadinessAttempt.findOne === 'function') {
+      try {
+        const query = ReadinessAttempt.findOne({
+          student: req.user?._id,
+          course: course._id,
+          status: 'InProgress',
+        });
+        const existingAttempt = query && typeof query.populate === 'function'
+          ? await query.populate('questions')
+          : (query && typeof query.then === 'function' ? await query : null);
+
+        if (existingAttempt && Array.isArray(existingAttempt.questions) && existingAttempt.questions.length > 0) {
+          const validQuestions = existingAttempt.questions.filter((q) => q && q.question);
+          if (validQuestions.length > 0) {
+            const questionsForClient = validQuestions.map((q) => ({
+              id: q._id,
+              question: q.question,
+              options: q.options,
+              topic: q.topic,
+              difficulty: q.difficulty,
+            }));
+
+            return res.status(200).json({
+              success: true,
+              data: {
+                attemptId: existingAttempt._id,
+                questions: questionsForClient,
+                resumed: true,
+                answers: existingAttempt.answers || [],
+                course: {
+                  id: course._id,
+                  title: course.title,
+                  slug: course.slug,
+                },
+              },
+            });
+          }
+        }
+      } catch (_) {
+        // Fallback safely to create a new attempt if mock doesn't support query chaining
+      }
+    }
+
+    const questions = await getQuestionsForCourse(course);
+
+    if (questions.length === 0) {
+      throw new AppError('Unable to load readiness assessment questions at this time.', 500);
+    }
 
     const attempt = await ReadinessAttempt.create({
       student: req.user._id,
@@ -26,6 +124,7 @@ async function startAssessment(req, res, next) {
       status: 'InProgress',
     });
 
+    // Strip correctAnswerIndex before sending to student
     const questionsForClient = questions.map((q) => ({
       id: q._id,
       question: q.question,
@@ -34,7 +133,100 @@ async function startAssessment(req, res, next) {
       difficulty: q.difficulty,
     }));
 
-    res.status(201).json({ success: true, data: { attemptId: attempt._id, questions: questionsForClient } });
+    res.status(201).json({
+      success: true,
+      data: {
+        attemptId: attempt._id,
+        questions: questionsForClient,
+        resumed: false,
+        course: {
+          id: course._id,
+          title: course.title,
+          slug: course.slug,
+        },
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getAttempt(req, res, next) {
+  try {
+    const attempt = await ReadinessAttempt.findOne({
+      _id: req.params.attemptId,
+      student: req.user._id,
+    })
+      .populate('course', 'title slug level category price currency')
+      .populate('questions');
+
+    if (!attempt) throw new AppError('Assessment attempt not found.', 404);
+
+    const validQuestions = (attempt.questions || []).filter((q) => q && q.question);
+    const questionsForClient = validQuestions.map((q) => ({
+      id: q._id,
+      question: q.question,
+      options: q.options,
+      topic: q.topic,
+      difficulty: q.difficulty,
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        attemptId: attempt._id,
+        course: attempt.course,
+        status: attempt.status,
+        score: attempt.score,
+        outcome: attempt.outcome,
+        questions: questionsForClient,
+        answers: attempt.answers || [],
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getAssessmentStatus(req, res, next) {
+  try {
+    const { courseId } = req.params;
+    const course = await Course.findById(courseId);
+    if (!course) throw new AppError('Course not found.', 404);
+
+    const inProgressAttempt = await ReadinessAttempt.findOne({
+      student: req.user._id,
+      course: course._id,
+      status: 'InProgress',
+    }).sort({ createdAt: -1 });
+
+    const latestSubmittedAttempt = await ReadinessAttempt.findOne({
+      student: req.user._id,
+      course: course._id,
+      status: 'Submitted',
+    }).sort({ submittedAt: -1 });
+
+    const hasCustomQuestions = !!(await ReadinessQuestion.exists({
+      course: course._id,
+      isDefault: { $ne: true },
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        course: {
+          id: course._id,
+          title: course.title,
+          slug: course.slug,
+        },
+        hasCustomQuestions,
+        hasAssessment: true,
+        inProgressAttemptId: inProgressAttempt ? inProgressAttempt._id : null,
+        latestSubmittedAttemptId: latestSubmittedAttempt ? latestSubmittedAttempt._id : null,
+        latestOutcome: latestSubmittedAttempt ? latestSubmittedAttempt.outcome : null,
+        latestScore: latestSubmittedAttempt ? latestSubmittedAttempt.score : null,
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -43,6 +235,10 @@ async function startAssessment(req, res, next) {
 async function submitAssessment(req, res, next) {
   try {
     const { answers } = req.body; // [{ questionId, selectedIndex }]
+    if (!answers || !Array.isArray(answers) || answers.length === 0) {
+      throw new AppError('Assessment submission must contain an array of answers.', 400);
+    }
+
     const attempt = await ReadinessAttempt.findOne({
       _id: req.params.attemptId,
       student: req.user._id,
@@ -52,10 +248,13 @@ async function submitAssessment(req, res, next) {
     if (attempt.status === 'Submitted') throw new AppError('Assessment already submitted.', 400);
 
     const course = await Course.findById(attempt.course);
+    if (!course) throw new AppError('Course not found.', 404);
 
     attempt.answers = attempt.questions.map((q) => {
-      const given = answers.find((a) => a.questionId === q._id.toString());
-      const selectedIndex = given ? given.selectedIndex : -1;
+      const given = answers.find((a) => a && (a.questionId === q._id.toString() || a.questionId === q._id));
+      const selectedIndex = given && typeof given.selectedIndex === 'number'
+        ? given.selectedIndex
+        : (given && typeof given.selectedAnswerIndex === 'number' ? given.selectedAnswerIndex : -1);
       return {
         question: q._id,
         selectedIndex,
@@ -73,53 +272,112 @@ async function submitAssessment(req, res, next) {
     attempt.submittedAt = new Date();
     await attempt.save();
 
+    // Retrieve Student Profile and evaluate prerequisite fit check snapshot
+    let fitSnapshot = null;
+    try {
+      const StudentProfile = require('../models/StudentProfile');
+      const { checkCourseFit } = require('../services/eligibilityService');
+      const profile = await StudentProfile.findOne({ user: req.user._id });
+      if (profile) {
+        fitSnapshot = await checkCourseFit(profile, course);
+      }
+    } catch (_) {}
+
+    const isDirectPermitted = course.directEnrollmentPermitted !== false;
+    const isPrereqEligible = fitSnapshot ? fitSnapshot.result === 'Eligible' : true;
+    const resolvedEligibility = (isDirectPermitted && isPrereqEligible) ? 'Eligible' : 'Not Eligible';
+
     // Link and update active application for this student & course
-    const linkedApp = await Application.findOne({
+    let linkedApp = await Application.findOne({
       student: req.user._id,
       course: course._id,
-      status: { $in: ['Submitted', 'Readiness Required', 'Under Review', 'Manual Review'] },
+      status: { $nin: ['Cancelled', 'Withdrawn', 'Rejected', 'Confirmed', 'Completed'] },
     }).sort({ createdAt: -1 });
 
-    if (linkedApp) {
-      linkedApp.readinessAttempt = attempt._id;
-      linkedApp.statusHistory = linkedApp.statusHistory || [];
+    let admissionResult = null;
 
-      if (outcome === 'READY' || outcome === 'CONDITIONALLY_READY') {
-        linkedApp.eligibilityStatus = 'Eligible';
-        linkedApp.status = 'Under Review';
-        linkedApp.statusHistory.push({
-          status: 'Under Review',
-          note: `Readiness assessment completed with score ${score}% (${outcome}). Application submitted for Academic Review.`,
-          changedAt: new Date(),
+    if (['READY', 'ELIGIBLE', 'CONDITIONALLY_READY'].includes(outcome)) {
+      if (!linkedApp) {
+        linkedApp = await Application.create({
+          student: req.user._id,
+          course: course._id,
+          readinessAttempt: attempt._id,
+          status: 'Submitted',
+          eligibilityStatus: 'Eligible',
+          fitResultSnapshot: fitSnapshot || undefined,
+          statusHistory: [{ status: 'Submitted', note: `Readiness completed with score ${score}% (${outcome}).` }],
+          submittedAt: new Date(),
         });
+      } else {
+        linkedApp.readinessAttempt = attempt._id;
+        linkedApp.eligibilityStatus = 'Eligible';
+        if (fitSnapshot && !linkedApp.fitResultSnapshot) linkedApp.fitResultSnapshot = fitSnapshot;
         await linkedApp.save();
+      }
 
-        try {
-          await notify({
-            recipient: req.user._id,
-            title: 'Eligibility Completed',
-            message: 'Your application has passed the readiness/eligibility stage.',
-            type: 'success',
-            relatedCourse: course._id,
-            relatedApplication: linkedApp._id,
-          });
-        } catch (_) {}
-      } else if (outcome === 'FOUNDATION_REQUIRED') {
-        linkedApp.eligibilityStatus = 'Not Eligible';
+      // Automatically accept, atomically reserve seat, and issue payable invoice
+      admissionResult = await autoAcceptAndReserveSeat({
+        application: linkedApp,
+        studentId: req.user._id,
+        courseId: course._id,
+      });
+
+      if (admissionResult?.application) {
+        linkedApp = admissionResult.application;
+      }
+    } else if (['FOUNDATION_REQUIRED', 'FOUNDATION_RECOMMENDED'].includes(outcome)) {
+      if (!linkedApp) {
+        linkedApp = await Application.create({
+          student: req.user._id,
+          course: course._id,
+          readinessAttempt: attempt._id,
+          status: 'Foundation Recommended',
+          eligibilityStatus: resolvedEligibility,
+          fitResultSnapshot: fitSnapshot || undefined,
+          statusHistory: [{
+            status: 'Foundation Recommended',
+            note: `Readiness assessment score ${score}% (${outcome}). Foundational conditioning recommended.`,
+            changedAt: new Date(),
+          }],
+          submittedAt: new Date(),
+        });
+      } else {
+        linkedApp.readinessAttempt = attempt._id;
+        linkedApp.eligibilityStatus = resolvedEligibility;
         linkedApp.status = 'Foundation Recommended';
+        if (fitSnapshot && !linkedApp.fitResultSnapshot) linkedApp.fitResultSnapshot = fitSnapshot;
+        linkedApp.statusHistory = linkedApp.statusHistory || [];
         linkedApp.statusHistory.push({
           status: 'Foundation Recommended',
-          note: `Readiness assessment score ${score}% (${outcome}). Foundational course recommended.`,
+          note: `Readiness assessment score ${score}% (${outcome}). Foundational conditioning recommended.`,
           changedAt: new Date(),
         });
         await linkedApp.save();
+      }
+    } else {
+      // MANUAL_REVIEW
+      if (!linkedApp) {
+        linkedApp = await Application.create({
+          student: req.user._id,
+          course: course._id,
+          readinessAttempt: attempt._id,
+          status: 'Manual Review',
+          eligibilityStatus: 'In Progress',
+          statusHistory: [{
+            status: 'Manual Review',
+            note: `Readiness assessment score ${score}% (${outcome}). Academic Committee review required.`,
+            changedAt: new Date(),
+          }],
+          submittedAt: new Date(),
+        });
       } else {
-        // MANUAL_REVIEW
+        linkedApp.readinessAttempt = attempt._id;
         linkedApp.eligibilityStatus = 'In Progress';
-        linkedApp.status = 'Under Review';
+        linkedApp.status = 'Manual Review';
+        linkedApp.statusHistory = linkedApp.statusHistory || [];
         linkedApp.statusHistory.push({
-          status: 'Under Review',
-          note: `Readiness assessment completed with score ${score}% (${outcome}). Academic Board Review required.`,
+          status: 'Manual Review',
+          note: `Readiness assessment score ${score}% (${outcome}). Academic Committee review required.`,
           changedAt: new Date(),
         });
         await linkedApp.save();
@@ -130,11 +388,24 @@ async function submitAssessment(req, res, next) {
       recipient: req.user._id,
       title: 'Readiness Assessment Result',
       message: `You scored ${score}% on ${course.title}. Outcome: ${outcome.replace(/_/g, ' ')}.`,
-      type: outcome === 'READY' ? 'success' : 'warning',
+      type: ['READY', 'ELIGIBLE'].includes(outcome) ? 'success' : 'warning',
       relatedCourse: course._id,
     });
 
-    res.json({ success: true, data: { attemptId: attempt._id, score, outcome, knowledgeGaps } });
+    res.json({
+      success: true,
+      data: {
+        attemptId: attempt._id,
+        score,
+        outcome,
+        knowledgeGaps,
+        linkedApplicationId: linkedApp ? linkedApp._id : null,
+        applicationStatus: linkedApp ? linkedApp.status : null,
+        invoiceId: admissionResult?.invoice ? admissionResult.invoice._id : null,
+        waitlisted: admissionResult?.waitlisted || (linkedApp?.status === 'Waitlisted'),
+        waitlistPosition: admissionResult?.waitlistPosition || linkedApp?.waitlistPosition,
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -146,13 +417,50 @@ async function getResult(req, res, next) {
       _id: req.params.attemptId,
       student: req.user._id,
     })
-      .populate('course', 'title level')
+      .populate('course', 'title slug level price currency duration deliveryMode')
       .populate('recommendedCourse', 'title slug level');
 
     if (!attempt) throw new AppError('Assessment attempt not found.', 404);
     if (attempt.status !== 'Submitted') throw new AppError('Assessment not yet submitted.', 400);
 
-    res.json({ success: true, data: attempt });
+    // Look up linked active application and invoice
+    let linkedApp = null;
+    let invoice = null;
+    if (attempt.course?._id) {
+      linkedApp = await Application.findOne({
+        student: req.user._id,
+        course: attempt.course._id,
+        status: { $nin: ['Cancelled', 'Withdrawn', 'Rejected'] },
+      }).sort({ createdAt: -1 });
+
+      if (linkedApp) {
+        if (!linkedApp.readinessAttempt) {
+          linkedApp.readinessAttempt = attempt._id;
+          await linkedApp.save();
+        }
+
+        // Self-heal eligible applications previously stuck in Under Review
+        if (linkedApp.eligibilityStatus === 'Eligible' && ['Under Review', 'Submitted'].includes(linkedApp.status)) {
+          const healed = await autoAcceptAndReserveSeat({
+            application: linkedApp,
+            studentId: req.user._id,
+            courseId: attempt.course._id,
+          });
+          if (healed?.application) linkedApp = healed.application;
+        }
+
+        invoice = await Invoice.findOne({ application: linkedApp._id, student: req.user._id });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        ...attempt.toObject(),
+        application: linkedApp || null,
+        invoice: invoice || null,
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -263,6 +571,8 @@ async function adminDeleteQuestion(req, res, next) {
 
 module.exports = {
   startAssessment,
+  getAttempt,
+  getAssessmentStatus,
   submitAssessment,
   getResult,
   adminCreateQuestion,

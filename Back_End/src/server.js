@@ -3,10 +3,12 @@ const app = require('./app');
 const connectDB = require('./config/db');
 const { processExpiredInvoices } = require('./services/paymentService');
 const { verifySmtpConnection, isSmtpConfigured } = require('./utils/email');
+const { ensureDefaultReadinessQuestions } = require('./services/defaultReadinessInitService');
 
 const PORT = process.env.PORT || 5000;
 
-connectDB().then(() => {
+connectDB().then(async () => {
+  await ensureDefaultReadinessQuestions();
   app.listen(PORT, async () => {
     console.log(`[SERVER] EGSA Space Academy API running on port ${PORT}`);
 

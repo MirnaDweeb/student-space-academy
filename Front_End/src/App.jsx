@@ -18,6 +18,7 @@ import CourseDetailsPage from './pages/student/CourseDetailsPage.jsx';
 import CourseFitPage from './pages/student/CourseFitPage.jsx';
 import ApplicationsPage from './pages/student/ApplicationsPage.jsx';
 import ApplicationDetailPage from './pages/student/ApplicationDetailPage.jsx';
+import FoundationReviewPage from './pages/student/FoundationReviewPage.jsx';
 import TrainingPage from './pages/student/TrainingPage.jsx';
 import AttendancePage from './pages/student/AttendancePage.jsx';
 import AssessmentsPage from './pages/student/AssessmentsPage.jsx';
@@ -29,6 +30,7 @@ import GoalPage from './pages/student/GoalPage.jsx';
 import LearningPathPage from './pages/student/LearningPathPage.jsx';
 import EvaluationPage from './pages/student/EvaluationPage.jsx';
 import PaymentsPage from './pages/student/PaymentsPage.jsx';
+import MockCheckoutPage from './pages/student/MockCheckoutPage.jsx';
 import MediaPage from './pages/student/MediaPage.jsx';
 import CertificatePage from './pages/student/CertificatePage.jsx';
 import NotificationsPage from './pages/student/NotificationsPage.jsx';
@@ -58,6 +60,9 @@ export default function App() {
 
       {/* Protected Student Portal with StudentLayout (Persistent Sidebar) */}
       <Route path="/student" element={<ProtectedRoute />}>
+        {/* Isolated Mock Checkout Route (Without StudentLayout frame when embedded) */}
+        <Route path="payments/mock-checkout" element={<MockCheckoutPage />} />
+
         <Route element={<StudentLayout />}>
           {/* Index Redirect */}
           <Route index element={<Navigate to="/student/dashboard" replace />} />
@@ -74,6 +79,7 @@ export default function App() {
           {/* 3. My Applications */}
           <Route path="applications" element={<ApplicationsPage />} />
           <Route path="applications/:id" element={<ApplicationDetailPage />} />
+          <Route path="applications/:id/foundation" element={<FoundationReviewPage />} />
 
           {/* 4. My Training */}
           <Route path="training" element={<TrainingPage />} />

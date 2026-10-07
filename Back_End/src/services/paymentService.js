@@ -8,6 +8,8 @@ const Cohort = require('../models/Cohort');
 const Course = require('../models/Course');
 const TrainingSession = require('../models/TrainingSession');
 const User = require('../models/User');
+const RefundAccount = require('../models/RefundAccount');
+const RefundRequest = require('../models/RefundRequest');
 const Notification = require('../models/Notification');
 const { notify } = require('./notificationService');
 const { sendPaymentAndEnrollmentConfirmedEmail } = require('../utils/email');
@@ -41,7 +43,9 @@ function calculatePricing(course, packageType = 'WITHOUT_TRANSPORTATION') {
 
   return {
     basePrice,
+    baseAmount: basePrice,
     transportationPrice,
+    transportationAmount: transportationPrice,
     totalAmount,
     currency,
     packageType: isWithTrans ? 'WITH_TRANSPORTATION' : 'WITHOUT_TRANSPORTATION',
@@ -96,7 +100,7 @@ async function issueInvoice({ student, application, course, transportationAmount
  * Verifies that the application is ACCEPTED before granting payment access.
  */
 async function getOrCreateInvoiceForApplication({ applicationId, studentId, packageType = 'WITHOUT_TRANSPORTATION' }) {
-  const application = await Application.findOne({
+  let application = await Application.findOne({
     _id: applicationId,
     student: studentId,
   })
@@ -105,6 +109,31 @@ async function getOrCreateInvoiceForApplication({ applicationId, studentId, pack
 
   if (!application) {
     throw new AppError('Application not found or does not belong to the student.', 404);
+  }
+
+  // Self-heal eligible applications that are pending review or direct-enrollable foundation recommendations
+  const canDirectSettle =
+    application.status === 'Foundation Recommended' &&
+    application.course?.directEnrollmentPermitted !== false;
+
+  if (
+    (application.eligibilityStatus === 'Eligible' && ['Under Review', 'Submitted', 'Draft'].includes(application.status)) ||
+    canDirectSettle
+  ) {
+    try {
+      const { autoAcceptAndReserveSeat } = require('./admissionService');
+      const healed = await autoAcceptAndReserveSeat({
+        application,
+        studentId,
+        packageType,
+        directEnroll: canDirectSettle || application.eligibilityStatus === 'Eligible',
+      });
+      if (healed?.application) {
+        application = healed.application;
+      }
+    } catch (healErr) {
+      console.error('[AUTO HEAL ERROR in getOrCreateInvoiceForApplication]:', healErr.message);
+    }
   }
 
   const allowedStatuses = ['Accepted', 'Eligible - Payment Pending'];
@@ -152,9 +181,9 @@ async function getOrCreateInvoiceForApplication({ applicationId, studentId, pack
 
 /**
  * Initiates a formal payment attempt with the configured payment gateway provider.
- * Implements strict authorization, pricing recalculation, and idempotency.
+ * Implements strict authorization, pricing recalculation, refund destination validation, and idempotency.
  */
-async function initiatePayment({ invoiceId, applicationId, studentId, packageType = 'WITHOUT_TRANSPORTATION', method = 'Card', returnUrl }) {
+async function initiatePayment({ invoiceId, applicationId, studentId, packageType = 'WITHOUT_TRANSPORTATION', method = 'Card', returnUrl, refundDetails }) {
   let targetInvoiceId = invoiceId;
 
   if (!targetInvoiceId && applicationId) {
@@ -189,6 +218,26 @@ async function initiatePayment({ invoiceId, applicationId, studentId, packageTyp
     throw new AppError('Payment deadline passed (72h prior to course start). The seat reservation has expired.', 400);
   }
 
+  const studentUser = await User.findById(studentId).select('fullName email phone');
+
+  // Phase 9: Ensure student has confirmed refund destination before payment
+  let refundAccount = await RefundAccount.findOne({ student: studentId });
+  if (!refundAccount && refundDetails) {
+    refundAccount = await saveStudentRefundAccount({
+      studentId,
+      ...refundDetails,
+      actorId: studentId,
+    });
+  } else if (!refundAccount && studentUser) {
+    // Default to student's original payment method refund destination if not yet explicitly saved
+    refundAccount = await saveStudentRefundAccount({
+      studentId,
+      accountHolderName: studentUser.fullName,
+      refundMethod: 'ORIGINAL_PAYMENT_METHOD',
+      actorId: studentId,
+    });
+  }
+
   // Authoritative trusted price calculation
   const pricing = calculatePricing(invoice.course, packageType);
   invoice.packageType = pricing.packageType;
@@ -202,8 +251,8 @@ async function initiatePayment({ invoiceId, applicationId, studentId, packageTyp
 
   // Create unique transaction record
   const transactionId = `TXN_${crypto.randomBytes(8).toString('hex').toUpperCase()}`;
-  // Enforce STRIPE provider for card payments unless explicitly overridden by environment
-  const providerName = process.env.PAYMENT_PROVIDER || (method === 'Card' ? 'STRIPE' : 'STRIPE');
+  // Enforce PAYMOB provider for card payments unless explicitly overridden by environment
+  const providerName = process.env.PAYMENT_PROVIDER || (method === 'Card' ? 'PAYMOB' : 'PAYMOB');
   const provider = getPaymentProvider(providerName);
 
   const transaction = await PaymentTransaction.create({
@@ -217,9 +266,8 @@ async function initiatePayment({ invoiceId, applicationId, studentId, packageTyp
     isMock: provider.name === 'DEVELOPMENT_MOCK',
     packageType: pricing.packageType,
     status: 'Initiated',
+    refundableBalance: pricing.totalAmount,
   });
-
-  const studentUser = await User.findById(studentId).select('fullName email phone');
 
   // Call provider adapter with robust error recovery
   let providerSession;
@@ -242,17 +290,39 @@ async function initiatePayment({ invoiceId, applicationId, studentId, packageTyp
     throw initErr;
   }
 
-  transaction.providerReference = providerSession.providerReference;
-  transaction.metadata = { sessionToken: providerSession.sessionToken };
+  transaction.providerReference = providerSession.providerReference || providerSession.orderId;
+  transaction.providerSessionId = providerSession.paymentKey || providerSession.sessionToken;
+  transaction.providerOrderId = providerSession.orderId;
+  transaction.metadata = {
+    sessionToken: providerSession.sessionToken,
+    paymentKey: providerSession.paymentKey,
+    iframeId: providerSession.iframeId,
+  };
   await transaction.save();
+
+  invoice.providerSessionId = providerSession.paymentKey || providerSession.sessionToken;
+  invoice.providerReference = providerSession.providerReference || providerSession.orderId;
+  await invoice.save();
 
   return {
     invoice,
     transaction,
     paymentUrl: providerSession.paymentUrl,
+    iframeUrl: providerSession.iframeUrl,
+    paymentKey: providerSession.paymentKey,
+    orderId: providerSession.orderId,
+    iframeId: providerSession.iframeId,
     sessionToken: providerSession.sessionToken,
+    provider: provider.name,
     isMock: providerSession.isMock,
     notice: providerSession.notice,
+    refundAccountMasked: {
+      accountHolderName: refundAccount?.accountHolderName,
+      refundMethod: refundAccount?.refundMethod,
+      bankName: refundAccount?.bankName,
+      maskedAccount: refundAccount?.accountNumberMasked,
+      maskedIban: refundAccount?.ibanMasked,
+    },
   };
 }
 
@@ -941,6 +1011,443 @@ async function adminGetPaymentDetails(invoiceId) {
   };
 }
 
+/**
+ * Student: Get masked refund account details.
+ */
+async function getStudentRefundAccount(studentId) {
+  let acc = await RefundAccount.findOne({ student: studentId });
+  if (!acc) {
+    const studentUser = await User.findById(studentId);
+    if (studentUser) {
+      acc = await saveStudentRefundAccount({
+        studentId,
+        accountHolderName: studentUser.fullName,
+        refundMethod: 'ORIGINAL_PAYMENT_METHOD',
+        actorId: studentId,
+      });
+    }
+  }
+  return acc;
+}
+
+/**
+ * Student / Finance: Register or update student refund destination.
+ */
+async function saveStudentRefundAccount({
+  studentId,
+  accountHolderName,
+  refundMethod = 'ORIGINAL_PAYMENT_METHOD',
+  bankName,
+  accountNumber,
+  iban,
+  swiftCode,
+  actorId,
+}) {
+  if (!studentId) {
+    throw new AppError('Student identifier is required.', 400);
+  }
+  if (!accountHolderName || !accountHolderName.trim()) {
+    throw new AppError('Account holder full legal name is required.', 400);
+  }
+
+  if (refundMethod === 'BANK_TRANSFER') {
+    if (!bankName || !bankName.trim()) {
+      throw new AppError('Bank name is required for bank transfer refunds.', 400);
+    }
+    if ((!accountNumber || !accountNumber.trim()) && (!iban || !iban.trim())) {
+      throw new AppError('Bank account number or IBAN is required for bank transfer refunds.', 400);
+    }
+  }
+
+  let acc = await RefundAccount.findOne({ student: studentId });
+  if (!acc) {
+    acc = new RefundAccount({
+      student: studentId,
+      accountHolderName: accountHolderName.trim(),
+      refundMethod,
+      bankName: bankName?.trim(),
+      swiftCode: swiftCode?.trim(),
+    });
+  } else {
+    acc.accountHolderName = accountHolderName.trim();
+    acc.refundMethod = refundMethod;
+    if (bankName) acc.bankName = bankName.trim();
+    if (swiftCode) acc.swiftCode = swiftCode.trim();
+    acc.lastUpdatedBy = actorId || studentId;
+  }
+
+  if (accountNumber && accountNumber.trim()) {
+    acc.setAccountNumber(accountNumber.trim());
+  }
+  if (iban && iban.trim()) {
+    acc.setIban(iban.trim());
+  }
+
+  acc.isConfirmed = true;
+  acc.confirmedAt = new Date();
+  acc.auditLog = acc.auditLog || [];
+  acc.auditLog.push({
+    action: 'REFUND_ACCOUNT_UPDATED',
+    actor: actorId || studentId,
+    actorRole: 'student',
+    timestamp: new Date(),
+    details: `Refund destination updated. Method: ${refundMethod}. Holder: ${accountHolderName}.`,
+  });
+
+  await acc.save();
+  return acc;
+}
+
+/**
+ * Student: Submit a refund request for an eligible settled invoice.
+ */
+async function requestRefund({ invoiceId, studentId, amount, reason }) {
+  if (!invoiceId) throw new AppError('Invoice ID is required.', 400);
+  if (!reason || !reason.trim()) throw new AppError('Refund request reason is required.', 400);
+
+  const invoice = await Invoice.findOne({ _id: invoiceId, student: studentId }).populate('course');
+  if (!invoice) throw new AppError('Invoice not found or does not belong to student.', 404);
+
+  if (invoice.status !== 'Paid' && invoice.status !== 'PAID') {
+    throw new AppError('Refund requests can only be submitted for settled/paid invoices.', 400);
+  }
+
+  const transaction = await PaymentTransaction.findOne({
+    invoice: invoice._id,
+    student: studentId,
+    status: { $in: ['Paid', 'Success', 'Partially_Refunded'] },
+  }).sort({ createdAt: -1 });
+
+  if (!transaction) {
+    throw new AppError('No eligible settled payment transaction found for this invoice.', 404);
+  }
+
+  const availableRefundable = transaction.refundableBalance != null
+    ? transaction.refundableBalance
+    : Math.max(0, transaction.amount - (transaction.refundAmount || 0));
+
+  if (availableRefundable <= 0) {
+    throw new AppError('This payment transaction has already been fully refunded.', 400);
+  }
+
+  const requestedAmount = amount ? Number(amount) : availableRefundable;
+  if (isNaN(requestedAmount) || requestedAmount <= 0) {
+    throw new AppError('Invalid refund amount requested.', 400);
+  }
+  if (requestedAmount > availableRefundable) {
+    throw new AppError(
+      `Requested refund amount (${requestedAmount} EGP) exceeds maximum refundable balance (${availableRefundable} EGP).`,
+      400
+    );
+  }
+
+  // Ensure active refund account destination exists
+  const refundAcc = await getStudentRefundAccount(studentId);
+  if (!refundAcc) {
+    throw new AppError('Please register your Refund Account Details before submitting a refund request.', 400);
+  }
+
+  // Prevent duplicate pending requests for the same invoice
+  const existingPending = await RefundRequest.findOne({
+    invoice: invoice._id,
+    status: { $in: ['Pending Review', 'Approved', 'Processing'] },
+  });
+  if (existingPending) {
+    throw new AppError(
+      `A refund request (${existingPending.refundNumber}) is already active with status "${existingPending.status}".`,
+      400
+    );
+  }
+
+  const refundNumber = typeof RefundRequest.generateRefundNumber === 'function'
+    ? RefundRequest.generateRefundNumber()
+    : `EGSA-REF-${Math.floor(100000 + Math.random() * 900000)}`;
+
+  const refundReq = await RefundRequest.create({
+    refundNumber,
+    invoice: invoice._id,
+    transaction: transaction._id,
+    student: studentId,
+    course: invoice.course?._id || invoice.course,
+    amount: requestedAmount,
+    currency: transaction.currency || 'EGP',
+    reason: reason.trim(),
+    status: 'Pending Review',
+    refundDestination: {
+      refundMethod: refundAcc.refundMethod,
+      accountHolderName: refundAcc.accountHolderName,
+      bankName: refundAcc.bankName,
+      maskedAccount: refundAcc.accountNumberMasked,
+      maskedIban: refundAcc.ibanMasked,
+    },
+    auditLog: [
+      {
+        action: 'REFUND_REQUESTED',
+        actor: studentId,
+        actorRole: 'student',
+        timestamp: new Date(),
+        details: `Student requested refund of ${requestedAmount} EGP. Reason: ${reason.trim()}`,
+      },
+    ],
+  });
+
+  invoice.refundStatus = 'Requested';
+  await invoice.save();
+
+  try {
+    await notify({
+      recipient: studentId,
+      title: 'Refund Request Submitted',
+      message: `Your refund request ${refundNumber} for ${requestedAmount} EGP has been received and is currently Pending Review by EGSA Academy administration.`,
+      type: 'info',
+      relatedCourse: invoice.course?._id,
+    });
+  } catch (_) {}
+
+  return refundReq;
+}
+
+/**
+ * Student: List my submitted refund requests.
+ */
+async function listStudentRefunds(studentId) {
+  return RefundRequest.find({ student: studentId })
+    .populate('course', 'title code level')
+    .populate('invoice', 'invoiceNumber amount currency status')
+    .sort({ createdAt: -1 });
+}
+
+/**
+ * Admin: List all platform refund requests with filtering.
+ */
+async function adminListRefunds(filters = {}) {
+  const query = {};
+  if (filters.status && filters.status !== 'ALL') {
+    query.status = filters.status;
+  }
+  if (filters.studentId) {
+    query.student = filters.studentId;
+  }
+  return RefundRequest.find(query)
+    .populate('student', 'fullName email phone nationalId registrationNumber')
+    .populate('course', 'title code level')
+    .populate('invoice', 'invoiceNumber amount currency status')
+    .populate('transaction', 'transactionId amount currency provider status providerReference')
+    .sort({ createdAt: -1 });
+}
+
+/**
+ * Admin: Get single refund request audit details.
+ */
+async function adminGetRefundDetails(refundRequestId) {
+  const req = await RefundRequest.findById(refundRequestId)
+    .populate('student', 'fullName email phone nationalId registrationNumber')
+    .populate('course', 'title code level')
+    .populate('invoice')
+    .populate('transaction')
+    .populate('adminDecision.decidedBy', 'fullName email')
+    .populate('execution.processedBy', 'fullName email');
+
+  if (!req) {
+    throw new AppError('Refund request not found.', 404);
+  }
+  return req;
+}
+
+/**
+ * Admin: Review, approve, or reject refund request.
+ */
+async function adminReviewRefund({ refundRequestId, adminId, decision, decisionNote, approvedAmount }) {
+  const refundReq = await RefundRequest.findById(refundRequestId)
+    .populate('invoice')
+    .populate('transaction')
+    .populate('student');
+
+  if (!refundReq) throw new AppError('Refund request not found.', 404);
+
+  const normDecision =
+    decision && String(decision).toUpperCase() === 'APPROVED'
+      ? 'Approved'
+      : decision && String(decision).toUpperCase() === 'REJECTED'
+      ? 'Rejected'
+      : decision;
+
+  if (!['Approved', 'Rejected'].includes(normDecision)) {
+    throw new AppError('Invalid review decision. Must be Approved or Rejected.', 400);
+  }
+
+  if (normDecision === 'Rejected' && (!decisionNote || !decisionNote.trim())) {
+    throw new AppError('Decision note is required when rejecting a refund.', 400);
+  }
+
+  if (refundReq.status !== 'Pending Review') {
+    throw new AppError(`Cannot review a refund that is already in status "${refundReq.status}".`, 400);
+  }
+
+  const finalApprovedAmount = normDecision === 'Approved'
+    ? (approvedAmount != null ? Number(approvedAmount) : refundReq.amount)
+    : 0;
+
+  if (normDecision === 'Approved' && (finalApprovedAmount <= 0 || finalApprovedAmount > refundReq.amount)) {
+    throw new AppError(`Approved amount must be between 1 and ${refundReq.amount} EGP.`, 400);
+  }
+
+  refundReq.status = normDecision;
+  refundReq.adminDecision = {
+    decidedBy: adminId,
+    decidedAt: new Date(),
+    decisionNote: decisionNote || '',
+    approvedAmount: finalApprovedAmount,
+  };
+
+  refundReq.auditLog = refundReq.auditLog || [];
+  refundReq.auditLog.push({
+    action: `REFUND_${normDecision.toUpperCase()}`,
+    actor: adminId,
+    actorRole: 'admin',
+    timestamp: new Date(),
+    details: `Admin marked request as ${normDecision}. Amount: ${finalApprovedAmount} EGP. Note: ${decisionNote || 'N/A'}`,
+  });
+
+  if (normDecision === 'Approved') {
+    if (refundReq.invoice) {
+      refundReq.invoice.refundStatus = 'Approved';
+      await refundReq.invoice.save();
+    }
+  } else {
+    if (refundReq.invoice && refundReq.invoice.refundAmount === 0) {
+      refundReq.invoice.refundStatus = 'None';
+      await refundReq.invoice.save();
+    }
+  }
+
+  await refundReq.save();
+
+  try {
+    await notify({
+      recipient: refundReq.student._id,
+      title: `Refund Request ${decision}`,
+      message: `Your refund request ${refundReq.refundNumber} has been ${decision.toLowerCase()} by EGSA Academy administration.${decisionNote ? ` Note: ${decisionNote}` : ''}`,
+      type: decision === 'Approved' ? 'success' : 'warning',
+    });
+  } catch (_) {}
+
+  return refundReq;
+}
+
+/**
+ * Admin: Execute and finalize an approved refund.
+ * Confirms real money movement via Paymob gateway or approved bank wire.
+ */
+async function adminProcessRefund({ refundRequestId, adminId, settlementMethod = 'BANK_TRANSFER', manualReference, notes }) {
+  const refundReq = await RefundRequest.findById(refundRequestId)
+    .populate('invoice')
+    .populate('transaction')
+    .populate('student');
+
+  if (!refundReq) throw new AppError('Refund request not found.', 404);
+
+  if (refundReq.status !== 'Approved') {
+    throw new AppError(`Only approved refunds can be processed. Current status: ${refundReq.status}`, 400);
+  }
+
+  const tx = refundReq.transaction;
+  if (!tx) throw new AppError('Linked payment transaction not found.', 404);
+
+  const amountToRefund = refundReq.adminDecision?.approvedAmount || refundReq.amount;
+
+  const currentRefundable = tx.refundableBalance != null
+    ? tx.refundableBalance
+    : Math.max(0, tx.amount - (tx.refundAmount || 0));
+
+  if (amountToRefund > currentRefundable) {
+    throw new AppError(`Refund amount (${amountToRefund}) exceeds remaining refundable balance (${currentRefundable}).`, 400);
+  }
+
+  let providerRef = manualReference;
+
+  if (settlementMethod === 'PAYMOB_ONLINE') {
+    const provider = getPaymentProvider(tx.provider || 'PAYMOB');
+    if (typeof provider.processRefund === 'function') {
+      try {
+        const provRes = await provider.processRefund({
+          transaction: tx,
+          amount: amountToRefund,
+          reason: refundReq.reason,
+        });
+        providerRef = provRes.refundReference;
+      } catch (provErr) {
+        refundReq.status = 'Failed';
+        refundReq.execution = {
+          processedBy: adminId,
+          processedAt: new Date(),
+          failureReason: provErr.message,
+          notes,
+        };
+        await refundReq.save();
+        throw new AppError(`Gateway refund failed: ${provErr.message}`, 500);
+      }
+    }
+  }
+
+  if (!providerRef) {
+    providerRef = `MANUAL_REF_${Date.now()}`;
+  }
+
+  // Atomically finalize refund records
+  refundReq.status = 'Refunded';
+  refundReq.execution = {
+    processedBy: adminId,
+    processedAt: new Date(),
+    providerReference: providerRef,
+    settlementMethod,
+    notes,
+  };
+  refundReq.auditLog = refundReq.auditLog || [];
+  refundReq.auditLog.push({
+    action: 'REFUND_SETTLED',
+    actor: adminId,
+    actorRole: 'admin',
+    timestamp: new Date(),
+    details: `Settled ${amountToRefund} EGP via ${settlementMethod}. Ref: ${providerRef}`,
+  });
+  await refundReq.save();
+
+  // Update transaction accounting
+  tx.refundAmount = (tx.refundAmount || 0) + amountToRefund;
+  tx.refundableBalance = Math.max(0, tx.amount - tx.refundAmount);
+  tx.refundedAt = new Date();
+  tx.status = tx.refundableBalance === 0 ? 'Refunded' : 'Partially_Refunded';
+  await tx.save();
+
+  // Update invoice accounting
+  if (refundReq.invoice) {
+    const inv = await Invoice.findById(refundReq.invoice._id);
+    if (inv) {
+      inv.refundAmount = (inv.refundAmount || 0) + amountToRefund;
+      inv.refundedAt = new Date();
+      inv.refundedBy = adminId;
+      inv.refundReason = refundReq.reason;
+      inv.refundStatus = tx.refundableBalance === 0 ? 'Refunded' : 'Partially Refunded';
+      if (tx.refundableBalance === 0) {
+        inv.status = 'Refunded';
+      }
+      await inv.save();
+    }
+  }
+
+  try {
+    await notify({
+      recipient: refundReq.student._id,
+      title: 'Refund Processed & Settled',
+      message: `Your refund of ${amountToRefund} EGP (Ref: ${providerRef}) has been confirmed and transferred via ${settlementMethod === 'PAYMOB_ONLINE' ? 'original card payment' : 'approved bank transfer'}.`,
+      type: 'success',
+    });
+  } catch (_) {}
+
+  return refundReq;
+}
+
 module.exports = {
   PAYMENT_DEADLINE_HOURS,
   calculatePricing,
@@ -954,4 +1461,13 @@ module.exports = {
   processExpiredInvoices,
   adminListPayments,
   adminGetPaymentDetails,
+  getStudentRefundAccount,
+  saveStudentRefundAccount,
+  requestRefund,
+  listStudentRefunds,
+  adminListRefunds,
+  adminGetRefundDetails,
+  adminReviewRefund,
+  adminProcessRefund,
 };
+

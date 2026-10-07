@@ -25,11 +25,18 @@ const InvoiceSchema = new mongoose.Schema(
     expiredAt: { type: Date },
 
     // Gateway integration tracking
+    providerSessionId: { type: String, sparse: true, index: true },
+    providerReference: { type: String, sparse: true, index: true },
     stripeCheckoutSessionId: { type: String, sparse: true, index: true },
     stripePaymentIntentId: { type: String, sparse: true, index: true },
 
-    // Refund audit fields (prepared for refunds architecture)
+    // Refund audit fields
     refundAmount: { type: Number, default: 0 },
+    refundStatus: {
+      type: String,
+      enum: ['None', 'Requested', 'Approved', 'Partially Refunded', 'Refunded'],
+      default: 'None',
+    },
     refundReason: { type: String },
     refundedAt: { type: Date },
     refundedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

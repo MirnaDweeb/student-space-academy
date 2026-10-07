@@ -6,6 +6,8 @@ const ctrl = require('../controllers/readinessController');
 
 // Student Readiness Assessment Routes
 router.post('/start', protect, validate(startAssessmentValidator), ctrl.startAssessment);
+router.get('/status/:courseId', protect, ctrl.getAssessmentStatus);
+router.get('/:attemptId', protect, ctrl.getAttempt);
 router.post('/:attemptId/submit', protect, validate(submitAssessmentValidator), ctrl.submitAssessment);
 router.get('/:attemptId/result', protect, ctrl.getResult);
 

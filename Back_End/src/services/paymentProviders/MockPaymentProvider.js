@@ -15,7 +15,7 @@ class MockPaymentProvider extends PaymentProviderInterface {
     const sessionToken = `mock_sess_${crypto.randomBytes(16).toString('hex')}`;
     const providerReference = `EGSA_MOCK_REF_${Date.now()}`;
     const clientBase = process.env.CLIENT_URL || 'http://localhost:5173';
-    const fallbackReturnUrl = `${clientBase}/student/payments?invoiceId=${invoice._id}&sessionToken=${sessionToken}`;
+    const mockCheckoutUrl = `${clientBase}/student/payments/mock-checkout?sessionToken=${sessionToken}&invoiceId=${invoice._id}&amount=${transaction.amount}&currency=${transaction.currency || 'EGP'}&transactionId=${transaction.transactionId}`;
 
     return {
       success: true,
@@ -23,9 +23,10 @@ class MockPaymentProvider extends PaymentProviderInterface {
       isMock: true,
       sessionToken,
       providerReference,
-      paymentUrl: returnUrl || fallbackReturnUrl,
+      iframeUrl: mockCheckoutUrl,
+      paymentUrl: mockCheckoutUrl,
       transactionId: transaction.transactionId,
-      notice: 'DEVELOPMENT MOCK GATEWAY: Simulated sandbox financial processing.',
+      notice: 'DEVELOPMENT MOCK GATEWAY: Isolated sandbox checkout frame for local testing.',
     };
   }
 

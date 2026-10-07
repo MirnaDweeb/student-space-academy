@@ -16,7 +16,7 @@ const ReadinessAttemptSchema = new mongoose.Schema(
     score: { type: Number },
     outcome: {
       type: String,
-      enum: ['READY', 'CONDITIONALLY_READY', 'FOUNDATION_REQUIRED', 'MANUAL_REVIEW'],
+      enum: ['READY', 'ELIGIBLE', 'CONDITIONALLY_READY', 'FOUNDATION_REQUIRED', 'FOUNDATION_RECOMMENDED', 'MANUAL_REVIEW'],
     },
     knowledgeGaps: [{ type: String }],
     recommendedCourse: { type: mongoose.Schema.Types.ObjectId, ref: 'Course' },

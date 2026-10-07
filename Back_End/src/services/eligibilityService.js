@@ -1,11 +1,12 @@
 const Course = require('../models/Course');
+const ReadinessQuestion = require('../models/ReadinessQuestion');
 
 /**
  * Evaluates whether a student fits a given course.
  * Business rule priority:
  *   1. Mandatory prerequisites ALWAYS override readiness score.
  *   2. Then required experience / academic status.
- *   3. Otherwise eligible, may still require readiness assessment.
+ *   3. Otherwise eligible, may still require readiness assessment if configured for course.
  */
 async function checkCourseFit(studentProfile, course) {
   const reasons = [];
@@ -59,7 +60,20 @@ async function checkCourseFit(studentProfile, course) {
     reasons.push({ code: 'OK', message: 'All prerequisite and experience checks passed.' });
   }
 
-  return { result, reasons, requiresReadiness: true };
+  let hasQuestions = true;
+  try {
+    const mongoose = require('mongoose');
+    if (mongoose.connection && mongoose.connection.readyState === 1 && course?._id) {
+      const exists = await ReadinessQuestion.exists({ course: course._id });
+      hasQuestions = !!exists;
+    } else if (course?.requiresReadiness !== undefined) {
+      hasQuestions = !!course.requiresReadiness;
+    }
+  } catch (_) {
+    hasQuestions = true;
+  }
+
+  return { result, reasons, requiresReadiness: !!hasQuestions };
 }
 
 module.exports = { checkCourseFit };
